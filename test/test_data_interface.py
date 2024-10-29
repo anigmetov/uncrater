@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy as sp
 import typing
+from icecream import ic
 
 sys.path.append('.')
 sys.path.append('./scripter/')
@@ -37,7 +38,9 @@ def fits(occurences: typing.List[int], probs: typing.List[float], p_value: float
     for k, p in zip(occurences, probs):
         res = sp.stats.binomtest(k, n, p)
         if res.pvalue < p_value:
+            print(f"fits returns False, {res.pvalue} < {p_value}")
             return False
+    print("fits returns True")
     return True
 
 
@@ -90,7 +93,6 @@ class Test_DataInterface(Test):
             Returns true if test has passed.
         """
         self.results = {}
-        passed = True
 
         coll.cut_to_hello()
         self.get_versions(coll)
@@ -98,7 +100,7 @@ class Test_DataInterface(Test):
         hb_num = coll.num_heartbeats()
         sp_num = coll.num_spectra_packets()
         heartbeat_counter_ok = coll.heartbeat_counter_ok()
-        sp_crc_ok = coll.all_spectra_crc_ok()
+        passed = sp_crc_ok = coll.all_spectra_crc_ok()
         occurences = {"high": 0, "med": 0, "low": 0}
         hb_tmax = coll.heartbeat_max_dt()
 
@@ -112,6 +114,8 @@ class Test_DataInterface(Test):
             # all 16 products in 1 packet have same AppId, divide by 16 for accurate statistics
             occurences[cat] = occurences[cat] // 16
             self.results[f'frac_{cat}'] = f"{occurences[cat] / sp_num:.4f}"
+
+        ic(sp_num, occurences, passed)
 
         if sp_num < 1:
             passed = False
