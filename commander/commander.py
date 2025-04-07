@@ -5,11 +5,7 @@ import sys
 import time
 import socket
 import shutil
-from DCBEmu import DCBEmulator
-from DCB import DCB
 from CoreloopBackend import CoreloopBackend
-from AWGBackendLab7 import AWGBackendLab7
-from AWGBackendSSL import AWGBackendSSL
 
 try:
     import pycoreloop as cl
@@ -75,18 +71,23 @@ class Commander:
         self.prepare_directory()
 
         if backend == "DCBEmu":
+            from DCBEmu import DCBEmulator
             self.backend = DCBEmulator(self.clog, self.uart_log, self.session)
         elif backend == "DCBEmu_nouart":
+            from DCBEmu import DCBEmulator
             self.backend = DCBEmulator(self.clog, None, self.session)
         elif backend == "coreloop":
             self.backend = CoreloopBackend(self.clog, self.uart_log, self.session)
         elif backend == "DCB":
+            from DCB import DCB
             print("Using the SSL DCB")
             self.backend = DCB(self.clog, self.uart_log, self.session)
         else:
             raise ValueError("Unknown backend.")
 
         if awg_backend is not None:
+            from AWGBackendLab7 import AWGBackendLab7
+            from AWGBackendSSL import AWGBackendSSL
             if awg_backend[:4] == "lab7":
                 if "_ch" in awg_backend:
                     ch = [int (i) for i in iawg_backend.split("_ch")[1]]
@@ -159,7 +160,7 @@ class Commander:
                             # wait command
                             dt = arg / 10 if arg < 65000 else 1e100  # 65000 is forever
                             self.clog.logt(f"Waiting for {dt}s.\n")
-                        elif cmd == 0xE1: 
+                        elif cmd == 0xE1:
                             # wait EOS
                             wait_eos = True
                             self.clog.logt(f"Waiting for EOS. \n")
