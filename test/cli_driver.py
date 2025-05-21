@@ -26,6 +26,7 @@ from test_wave import Test_Wave
 from test_cpt_short import Test_CPTShort
 from test_route import Test_Route
 from test_calibrator import Test_Calibrator
+from test_calibrator_zoom import Test_CalibratorZoom
 from test_calibweights import Test_Calib_Weights
 from test_watchdog import Test_Watchdog, Test_Watchdog_Command
 
@@ -65,11 +66,12 @@ Tests = [
     Test_BinResponse,
     Test_EncodingFormat,
     Test_Calibrator,
+    Test_CalibratorZoom,
     Test_Calib_Weights,
     Test_Reject,
     Test_Control,
     Test_Watchdog,
-    Test_Watchdog_Command, 
+    Test_Watchdog_Command,
     Test_Grimm
 ]
 
@@ -207,7 +209,7 @@ def main():
         with open(options_file, "w") as file:
             yaml.dump(options, file)
 
-        run_data = {'operator': args.operator, 'comments': args.comments, 'test_time': save_time()} 
+        run_data = {'operator': args.operator, 'comments': args.comments, 'test_time': save_time()}
         with open(f"{workdir}/run_data.yaml", "w") as file:
             yaml.dump(run_data, file)
 
@@ -235,7 +237,7 @@ def main():
             options = yaml.safe_load(file)
         for k,v in opt2dict(args.analysis_options).items():
             options[k] = v
-        
+
         run_data_file = f"{workdir}/run_data.yaml"
         with open(run_data_file, "r") as file:
             run_data = yaml.safe_load(file)
