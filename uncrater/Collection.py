@@ -17,7 +17,7 @@ class Collection:
         self.dir = dir
         self.cut_to_hello = cut_to_hello
         self.refresh()
-        
+
     def refresh(self):
         self.cont = []
         self.time = []
@@ -29,6 +29,7 @@ class Collection:
         self.watchdog_packets = []
         self.housekeeping_packets = []
         self.waveform_packets = []
+        self.zoom_spectra_packets = []
         flist = glob.glob(os.path.join(self.dir, "*.bin"))
         print(f"Analyzing {len(flist)} files from {self.dir}.")
         flist = sorted(flist, key=lambda x: int(x[x.rfind("/") + 1 :].split("_")[0]))
@@ -60,7 +61,7 @@ class Collection:
                 continue
             if appid_is_tr_spectrum(appid) and meta_packet is None:
                 continue
-            
+
             packet = Packet(appid, blob_fn=fn)
 
             # spectral/TR spectral packets must be read only after we set their metadata packet
@@ -109,7 +110,7 @@ class Collection:
                         self.calib_gNacc.append(packet.gNacc)
                         self.calib_gphase.append(packet.gphase)
 
-                
+
             if appid_is_rawPFB(appid):
                 if appid_is_rawPFB_start(appid):
                     packet.read()
@@ -123,8 +124,12 @@ class Collection:
                     if (part==0): # real part, comes first
                         self.calib_pfb[-1][packet.channel] = np.array(packet.data, complex)
                     else:
-                        self.calib_pfb[-1][packet.channel] += 1j*np.array(packet.data, complex)                    
-                    
+                        self.calib_pfb[-1][packet.channel] += 1j*np.array(packet.data, complex)
+
+            if appid_is_cal_zoom(appid):
+                packet.read()
+                self.zoom_spectra_packets.append(packet)
+
             if appid_is_cal_debug(appid):
                 if appid_is_cal_debug_start(appid):
                     packet.read()
@@ -147,7 +152,7 @@ class Collection:
             if isinstance(packet, Packet_Waveform):
                 self.waveform_packets.append(packet)
                 waveforms[packet.ch] = packet
-                
+
             if isinstance(packet, Packet_Waveform_Meta):
                 packet.set_packets(waveforms)
                 packet.read()
@@ -169,11 +174,11 @@ class Collection:
                     pfb[i].append(c['pfb'][i])
         if len(pfb[0])>0:
             self.pfb = np.array([np.hstack(p) for p in self.pfb])
-        
-    
+
+
         self.calib_gphase = np.array(self.calib_gphase)
         self.calib_data = np.array(self.calib_data)
-        
+
         if len(self.calib_gNacc)>0:
             self.calib_gNacc = np.hstack(self.calib_gNacc)
         dcalib = [c for c in self.calib_debug if None not in c]
@@ -185,13 +190,13 @@ class Collection:
             self.cd_errors = [c[0].errors for c in dcalib]
             # phase errors are 8 bits over two counter
             def get_counters(num):
-                return [num&0xFF, (num>>8)&0xFF , (num>>16)&0xFF, (num>>24)&0xFF] 
+                return [num&0xFF, (num>>8)&0xFF , (num>>16)&0xFF, (num>>24)&0xFF]
 
             self.cd_error_phaser = np.array([(get_counters(x.cal_phaser_err[0])+get_counters(x.cal_phaser_err[1])) for x in self.cd_errors])
             self.cd_error_averager = np.array([[get_counters(x.averager_err[r]) for r in range(16)] for x in self.cd_errors])
             self.cd_error_process = np.array([np.hstack([get_counters(x.averager_err[r]) for r in range(8)]) for x in self.cd_errors])
             self.cd_error_stage3 = np.array([np.hstack([get_counters(x.stage3_err[r]) for r in range(4)]) for x in self.cd_errors])
-            
+
 
             self.cd_drift = np.hstack([c[0].drift for c in dcalib])
             self.cd_powertop0 = np.hstack([c[0].powertop0 for c in dcalib])
@@ -259,7 +264,7 @@ class Collection:
                 ## great
                 continue
             elif (j<i) or (i==0):
-                # then we must have seen a re boot  
+                # then we must have seen a re boot
                 if j==0:
                     continue
             else:

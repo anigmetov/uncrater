@@ -20,9 +20,9 @@ from .Packet_Hello import Packet_Hello
 from .Packet_Heartbeat import Packet_Heartbeat
 from .Packet_Housekeep import Packet_Housekeep
 from .Packet_Spectrum import Packet_Spectrum, Packet_TR_Spectrum, Packet_Metadata
-from .Packet_Waveform import Packet_Waveform, Packet_Waveform_Meta  
+from .Packet_Waveform import Packet_Waveform, Packet_Waveform_Meta
 from .Packet_Bootloader import Packet_Bootloader
-from .Packet_Calibrator import Packet_Cal_Metadata, Packet_Cal_Data, Packet_Cal_RawPFB, Packet_Cal_Debug
+from .Packet_Calibrator import Packet_Cal_Metadata, Packet_Cal_Data, Packet_Cal_RawPFB, Packet_Cal_Debug, Packet_Cal_ZoomSpectra
 from .Packet_EOS import Packet_EOS
 from .Packet_Watchdog import Packet_Watchdog
 
@@ -39,6 +39,7 @@ PacketDict = {
     id.AppID_Calibrator_Data+2: Packet_Cal_Data,
     id.AppID_Calibrator_Debug: Packet_Cal_Debug,
     id.AppID_RawADC_Meta: Packet_Waveform_Meta,
+    id.AppID_ZoomSpectra: Packet_Cal_ZoomSpectra,
 }
 
 for i in range(16):
@@ -53,7 +54,7 @@ for i in range(16):
 
 for i in range(4):
     PacketDict[id.AppID_RawADC + i] = Packet_Waveform
-    
+
 for i in range(8):
     PacketDict[id.AppID_Calibrator_RawPFB + i] = Packet_Cal_RawPFB
     PacketDict[id.AppID_Calibrator_Debug + i] = Packet_Cal_Debug
@@ -90,15 +91,18 @@ def appid_is_cal_any(appid):
 def appid_is_cal_data(appid):
     return (appid >= id.AppID_Calibrator_Data) and (appid < id.AppID_Calibrator_Data + 3)
 
+def appid_is_cal_zoom(appid):
+    return appid == id.AppID_ZoomSpectra
+
 def appid_is_cal_data_start(appid):
-    return (appid == id.AppID_Calibrator_Data) 
+    return (appid == id.AppID_Calibrator_Data)
 
 
 def  appid_is_rawPFB(appid):
     return (appid >= id.AppID_Calibrator_RawPFB) and (appid < id.AppID_Calibrator_RawPFB + 8)
 
 def  appid_is_rawPFB_start(appid):
-    return (appid == id.AppID_Calibrator_RawPFB) 
+    return (appid == id.AppID_Calibrator_RawPFB)
 
 def appid_is_cal_debug(appid):
     return (appid >= id.AppID_Calibrator_Debug) and (appid < id.AppID_Calibrator_Debug + 8)
