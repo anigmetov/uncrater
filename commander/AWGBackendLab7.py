@@ -11,7 +11,7 @@ from AWGBackendBase import AWGBackendBase
 from VWDriver import VWDriver
 
 class AWGBackendLab7(AWGBackendBase):
-    def __init__ (self, channels = [1,3]):
+    def __init__ (self, channels = [1,3], cal_driver = False):
         if pyvisa is None:
             raise ValueError("pyvisa not installed, can't use AWG")
         #resource = "USB0::1689::834::C010077::0::INSTR"
@@ -27,14 +27,17 @@ class AWGBackendLab7(AWGBackendBase):
             self.inst.write('OUTP1:STAT OFF')
             self.inst.write('OUTP2:STAT OFF')
             self.channel = channels
-            
             print ("Initialized AWG backend for lab7, will respond to request for channel", self.channel)
-        try:
-            self.calibrator = VWDriver()
-            print ("Initialized WV EM Calibrator")
-        except:
-            self.calibrator=None
-
+        
+        if cal_driver:
+            try:
+                self.calibrator = VWDriver()
+                print ("Initialized WV EM Calibrator")
+            except:
+                print ("Error: could not initialize WV EM Calibrator")
+                self.calibrator = None
+        else:
+            self.calibrator = None
 
     
     def tone (self, ch, frequency, amplitude):
@@ -45,10 +48,11 @@ class AWGBackendLab7(AWGBackendBase):
             sour = self.channel.index(ch)+1
 
             if amplitude > 0:
+                print (f"Setting tone on channel {ch} (AWG source {sour}) to {frequency} MHz, {amplitude} mVPP")
                 self.inst.write(f'SOUR{sour}:FREQ {frequency} mhz')
-                print (f'SOUR{sour}:VOLT {amplitude:5.2f} mvpp')
                 self.inst.write(f'SOUR{sour}:VOLT {amplitude:5.2f} mvpp')
                 self.inst.write(f'OUTP{sour}:STAT ON')
+
             else:
                 self.inst.write(f'SOUR{sour}:FREQ 80 mhz') ## let's put it out of band
                 self.inst.write(f'OUTP{sour}:STAT OFF')
