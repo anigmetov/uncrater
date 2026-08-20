@@ -8,3 +8,6 @@ from .Packet_Waveform import Packet_Waveform
 from .Packet_Watchdog import Packet_Watchdog
 from .utils import *
 from .constants import NCHANNELS, NPRODUCTS
+
+appid = id
+__version__ = "1.0.0"

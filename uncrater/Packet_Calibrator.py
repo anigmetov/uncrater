@@ -1,9 +1,12 @@
 from tracemalloc import stop
 from .PacketBase import PacketBase, pystruct
 from .utils import Time2Time, cordic2rad, rle_decode
-from pycoreloop import appId as id
+from .coreloop import pycoreloop
 import struct, ctypes
 import numpy as np
+
+
+id = pycoreloop.appId
 
 
 class Packet_Cal_Metadata(PacketBase):

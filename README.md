@@ -3,14 +3,42 @@
 ![Automated tests now](https://github.com/lusee-night/uncrater/actions/workflows/tests.yml/badge.svg)
 
 # uncrater
-LuSEE Night binary blob unpackager
 
-## Dependencies
-### Python environment
-To install Python dependencies, run
+LuSEE-Night binary telemetry packet decoder.
+
+## Installation
+
+Install the runtime package with pip or uv:
+
 ```bash
-pip install -r requirements.txt
+python3 -m pip install .
 ```
+
+```bash
+uv pip install .
+```
+
+The runtime package includes the frozen coreloop schema bindings needed for
+decoding. Importing and decoding do not require `CORELOOP_DIR`, a sibling
+coreloop checkout, or a separately installed `pycoreloop` module.
+
+Optional dependency groups keep development-only tools out of the decoder's
+runtime environment:
+
+```bash
+python3 -m pip install ".[test]"
+python3 -m pip install ".[vendor]"
+python3 -m pip install ".[plot,report]"
+python3 -m pip install ".[lab]"
+```
+
+The `vendor` extra is only needed when regenerating frozen bindings from a
+pinned coreloop source checkout. The hardware commander/test harness may use
+an explicitly configured coreloop checkout; this is separate from runtime
+packet decoding.
+
+## Development and hardware dependencies
+
 ### Linux packages
 Install latex
 ```bash
@@ -20,12 +48,6 @@ sudo apt-get install texlive-full
 > messages hanging at some portions of the download at "This may take some time..." &mdash; simply click enter a few
 > times and it should continue running.
 
-
-## Coreloop dependency
-
-The python module `pycoreloop` that contains definitions of AppIDs and Spectrometer commands has to be imported.
-You can specify `CORELOOP_DIR` to specify the directory of the [coreloop](https://github.com/lusee-night/coreloop/) branch.
-In most setups `export CORELOOP_DIR=..` will do the job.
 
 ## Testing suite
 
