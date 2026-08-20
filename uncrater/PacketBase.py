@@ -1,6 +1,7 @@
 import os, sys
 import hexdump
 from .coreloop import pycoreloop,pycoreloop_203,pycoreloop_305,pycoreloop_307
+from .schema_registry import SchemaBinding, SchemaConflictError, resolve_wire_version
 pystruct = pycoreloop.pystruct
 pystruct_203 = pycoreloop_203.pystruct
 pystruct_305 = pycoreloop_305.pystruct
@@ -8,13 +9,79 @@ pystruct_307 = pycoreloop_307.pystruct
 
 
 class PacketBase:
-    def __init__ (self, appid, blob = None, blob_fn = None, version=None, **kwargs):
+    def __init__ (self, appid, blob = None, blob_fn = None, version=None,
+                  schema=None, reported_version=None, schema_variant=None,
+                  schema_assumed=None, evidence=None, diagnostic_override=False,
+                  original_appid=None, **kwargs):
         if (blob is None) and (blob_fn is None):
             raise ValueError
         self.appid = appid
+        self.original_appid = appid if original_appid is None else original_appid
         self._blob = blob
         self._blob_fn = blob_fn
-        self._version = version
+
+        if (reported_version is not None and version is not None
+                and reported_version != version):
+            raise SchemaConflictError("version and reported_version disagree")
+        if reported_version is None:
+            reported_version = version
+        if schema is None:
+            resolution = resolve_wire_version(
+                reported_version,
+                variant=schema_variant,
+                evidence=evidence,
+                diagnostic_override=diagnostic_override,
+            )
+            schema = resolution.binding
+            resolved_schema_assumed = resolution.schema_assumed
+        else:
+            if not isinstance(schema, SchemaBinding):
+                raise TypeError("schema must be a SchemaBinding")
+            resolved_schema_assumed = (
+                reported_version is None
+                or reported_version not in schema.accepted_reported_versions
+            )
+            if evidence is not None or schema_variant is not None:
+                resolution = resolve_wire_version(
+                    reported_version,
+                    variant=schema_variant,
+                    evidence=evidence,
+                    diagnostic_override=diagnostic_override,
+                )
+                if resolution.binding is not schema:
+                    raise SchemaConflictError(
+                        f"Packet evidence selects {resolution.binding.binding_key}, "
+                        f"not {schema.binding_key}"
+                    )
+                resolved_schema_assumed = resolution.schema_assumed
+            if (reported_version is not None
+                    and reported_version not in schema.accepted_reported_versions
+                    and evidence is None and schema_variant is None):
+                resolution = resolve_wire_version(
+                    reported_version,
+                    diagnostic_override=diagnostic_override,
+                )
+                if resolution.binding is not schema:
+                    raise SchemaConflictError(
+                        f"Reported version 0x{reported_version:X} does not match "
+                        f"binding {schema.binding_key}"
+                    )
+                resolved_schema_assumed = resolution.schema_assumed
+
+        if schema_assumed is not None:
+            if not isinstance(schema_assumed, bool):
+                raise TypeError("schema_assumed must be a bool or None")
+            if schema_assumed != resolved_schema_assumed:
+                raise SchemaConflictError("schema_assumed contradicts schema resolution")
+        schema_assumed = resolved_schema_assumed
+
+        # Keep the on-wire report separate from the frozen decoder selected for it
+        self.schema = schema
+        self.schema_id = schema.canonical_schema_id
+        self.reported_version = reported_version
+        self.schema_assumed = bool(schema_assumed)
+        self.binding_provenance = schema.binding_provenance
+        self._version = reported_version
         self._is_read = False
         for key, value in kwargs.items():
             setattr(self, key, value)

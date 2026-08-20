@@ -82,7 +82,7 @@ class Collection:
 
             # spectral/TR spectral packets must be read only after we set their metadata packet
             # all other packets: read immediately
-            if not (appid_is_spectrum(appid) or appid_is_tr_spectrum(appid) or appid_is_cal_any(appid)):
+            if not (appid_is_spectrum(appid) or appid_is_tr_spectrum(appid) or appid_is_cal_segmented_payload(appid)):
                 packet.read()
             if appid_is_watchdog(appid):
                 packet.read()
@@ -410,11 +410,17 @@ class Collection:
         
         assert(False), "Should not reach here"
 
-    def np_tr_spectra(self, ndx=None, product: Optional[int]=None):
+    def np_tr_spectra(self, ndx=None, product: Optional[int]=None, *, channel: Optional[int]=None):
         """ Returns a numpy array of the spectra data.
             If ndx is not None, returns only the spectra at that time.
             If product is not None, returns only the spectra for that channel.
+            The legacy channel keyword is an alias for product.
         """
+
+        if product is not None and channel is not None:
+            raise TypeError("product and channel are aliases; supply only one")
+        if channel is not None:
+            product = channel
 
         if len(self.tr_spectra)==0:
             return np.array([])
