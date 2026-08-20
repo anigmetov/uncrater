@@ -83,15 +83,15 @@ def appid_is_tr_spectrum(appid):
 
 
 def appid_is_raw_adc(appid: int) -> bool:
-    return id.appId.AppID_RawADC <= appid < id.appId.AppID_RawADC + 4
+    return id.AppID_RawADC <= appid < id.AppID_RawADC + 4
 
 
 def appid_is_zoom_spectrum(appid: int) -> bool:
-    return appid == id.appId.AppID_ZoomSpectra
+    return appid == id.AppID_ZoomSpectra
 
 
 def appid_is_grimm_spectrum(appid: int) -> bool:
-    return appid == id.appId.AppID_SpectraGrimm
+    return appid == id.AppID_SpectraGrimm
 
 
 def appid_is_cal_any(appid):
@@ -143,7 +143,7 @@ def appid_is_housekeeping(appid):
 
 
 def appid_is_waveform(appid):
-    return appid == id.AppId
+    return id.AppID_FW_DirectSpectrum <= appid < id.AppID_FW_DirectSpectrum + 4
 
 
 def appid_to_str(appid):
