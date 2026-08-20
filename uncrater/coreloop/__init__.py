@@ -12,6 +12,8 @@ import importlib
 # are reachable via pycoreloop.pycoreloop_XXX
 pycoreloop_203 = importlib.import_module('.pycoreloop_203', __name__)
 pycoreloop_305 = importlib.import_module('.pycoreloop_305', __name__)
+pycoreloop_306_early = importlib.import_module('.pycoreloop_306_early', __name__)
+pycoreloop_306_final = importlib.import_module('.pycoreloop_306_final', __name__)
 pycoreloop_307 = importlib.import_module('.pycoreloop_307', __name__)
 
 # Runtime decoding must not change with the caller's import path or
@@ -22,6 +24,8 @@ pycoreloop = pycoreloop_307
 __all__ = [
 	'pycoreloop_203',
 	'pycoreloop_305',
+	'pycoreloop_306_early',
+	'pycoreloop_306_final',
 	'pycoreloop_307',
     'pycoreloop'
 ]
