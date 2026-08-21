@@ -92,10 +92,10 @@ class Packet_SpectrumBase(PacketBase):
     def set_meta(self, meta):
         self.meta = meta
 
-    def set_priority(self):
+    def set_priority(self) -> None:
         raise RuntimeError("Packet_SpectrumBase is abstract, do not instantiate")
 
-    def parse_spectra(self):
+    def parse_spectra(self) -> bool:
         raise RuntimeError("Packet_SpectrumBase is abstract, do not instantiate")
 
     def get_fmt_and_ptype(self) -> Tuple[str, np.number]:
@@ -227,7 +227,7 @@ class Packet_Spectrum(Packet_SpectrumBase):
         self._crc_payload_size = expected_bytes
         self.data = data.astype(ptype).astype(np.float64) / weight * (1 << navg2_shift)
         return True
-        
+
 
 
 class Packet_TR_Spectrum(Packet_SpectrumBase):
@@ -323,4 +323,4 @@ class Packet_Grimm(PacketBase):
         desc = ""
         desc += f"packet_id : {self.unique_packet_id}\n"
         desc += f"Npoints: {len(self.data)}\n"
-        return desc    
+        return desc
