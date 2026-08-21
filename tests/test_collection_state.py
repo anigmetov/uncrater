@@ -261,9 +261,6 @@ def install_fake_packets(monkeypatch, call_log=None):
         monkeypatch.setattr(collection_module, name, packet_type)
 
     def factory(appid, blob_fn, schema, **kwargs):
-        path = Path(blob_fn)
-        if "mixed" in path.name:
-            schema = BINDINGS_BY_KEY["305"]
         if call_log is not None:
             call_log.append(
                 {
@@ -351,18 +348,15 @@ def test_fifth_repeated_waveform_is_rejected_by_received_count(monkeypatch, tmp_
     assert all(packet.timestamp == -1 for packet in collection.waveform_packets)
 
 
-def test_malformed_first_waveform_still_anchors_group_schema(monkeypatch, tmp_path):
+def test_malformed_waveform_invalidates_its_group(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     write_packet(tmp_path, 0, 0x2F0, label="malformed")
-    write_packet(tmp_path, 1, 0x2F1, label="mixed")
+    write_packet(tmp_path, 1, 0x2F1)
     write_packet(tmp_path, 2, 0x2FA)
 
     collection = Collection(tmp_path, strict=False)
 
-    assert collection.invalid_counts_by_issue == {
-        "bad_blob_length": 1,
-        "declared_version_mismatch": 1,
-    }
+    assert collection.invalid_counts_by_issue == {"bad_blob_length": 1}
     assert collection.waveform_groups == []
 
 
@@ -487,7 +481,7 @@ def test_new_start_flushes_missing_pages_before_starting_next_group(monkeypatch,
     assert collection.calibrator_data_groups[0]["unique_packet_id"] == 2
 
 
-def test_306_uses_segment_wide_rounded_housekeeping_evidence(monkeypatch, tmp_path):
+def test_306_uses_collection_wide_rounded_housekeeping_evidence(monkeypatch, tmp_path):
     calls = []
     install_fake_packets(monkeypatch, calls)
     write_packet(tmp_path, 0, 0x209, struct.pack("<I", 0x306))
@@ -504,7 +498,7 @@ def test_306_uses_segment_wide_rounded_housekeeping_evidence(monkeypatch, tmp_pa
     assert {call["binding"] for call in calls} == {"306-early"}
 
 
-def test_metadata_prefix_bootstraps_a_session_without_hello(monkeypatch, tmp_path):
+def test_metadata_prefix_bootstraps_a_collection_without_hello(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     write_packet(tmp_path, 0, 0x20F, struct.pack("<H", 0x305))
 
@@ -516,7 +510,7 @@ def test_metadata_prefix_bootstraps_a_session_without_hello(monkeypatch, tmp_pat
     assert not collection.schema_assumed
 
 
-def test_conflicting_306_evidence_rejects_the_whole_segment(monkeypatch, tmp_path):
+def test_conflicting_306_evidence_rejects_the_whole_collection(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     write_packet(tmp_path, 0, 0x209, struct.pack("<I", 0x306))
     early = bytearray(2572)
@@ -534,25 +528,25 @@ def test_conflicting_306_evidence_rejects_the_whole_segment(monkeypatch, tmp_pat
     assert collection.packet_counts_by_appid == {0x209: 1, 0x206: 1, 0x280: 1}
 
 
-def test_later_fixed_prefix_disagreement_rejects_the_whole_segment(
+def test_first_hello_selects_one_binding_for_the_whole_collection(
     monkeypatch, tmp_path
 ):
-    install_fake_packets(monkeypatch)
-    write_packet(tmp_path, 0, 0x209, struct.pack("<I", 0x307))
-    write_packet(tmp_path, 1, 0x20F, struct.pack("<H", 0x305))
+    calls = []
+    install_fake_packets(monkeypatch, calls)
+    write_packet(tmp_path, 0, 0x20A)
+    write_packet(tmp_path, 1, 0x209, struct.pack("<I", 0x305))
+    write_packet(tmp_path, 2, 0x209, struct.pack("<I", 0x305))
 
-    with pytest.raises(PacketDecodeError, match="declared_version_mismatch"):
-        Collection(tmp_path)
+    collection = Collection(tmp_path)
 
-    collection = Collection(tmp_path, strict=False)
-    assert collection.cont == []
-    assert collection.reported_schema_ids == (0x307, 0x305)
-    assert collection.selected_schema_bindings == ()
-    assert collection.packet_counts_by_appid == {0x209: 1, 0x20F: 1}
-    assert collection.invalid_counts_by_issue == {"declared_version_mismatch": 1}
+    assert collection.reported_schema_ids == (0x305,)
+    assert collection.selected_schema_bindings == ("305",)
+    assert not collection.schema_assumed
+    assert {call["binding"] for call in calls} == {"305"}
+    assert {call["reported_version"] for call in calls} == {0x305}
 
 
-def test_306_variant_hint_does_not_leak_into_other_segments(monkeypatch, tmp_path):
+def test_306_variant_hint_is_ignored_when_first_hello_is_307(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     write_packet(tmp_path, 0, 0x20A)
     write_packet(tmp_path, 1, 0x209, struct.pack("<I", 0x307))
@@ -561,7 +555,7 @@ def test_306_variant_hint_does_not_leak_into_other_segments(monkeypatch, tmp_pat
 
     assert len(collection.cont) == 2
     assert collection.selected_schema_bindings == ("307",)
-    assert collection.schema_assumed
+    assert not collection.schema_assumed
     assert collection.invalid_counts_by_issue == {}
 
 
@@ -596,7 +590,7 @@ def test_verbose_collection_preserves_valid_hello_version_message(
     ("version", "issue_code"),
     [(0x306, "ambiguous_schema"), (0x300, "unsupported_schema")],
 )
-def test_nonstrict_unsafe_schema_records_issue_and_skips_segment(
+def test_nonstrict_unsafe_schema_records_issue_and_skips_collection(
     monkeypatch, tmp_path, version, issue_code
 ):
     install_fake_packets(monkeypatch)
@@ -609,25 +603,22 @@ def test_nonstrict_unsafe_schema_records_issue_and_skips_segment(
     assert collection.invalid_counts_by_issue == {issue_code: 1}
 
 
-def test_hello_delimited_306_sessions_resolve_independently(monkeypatch, tmp_path):
-    install_fake_packets(monkeypatch)
+def test_306_evidence_after_a_later_hello_applies_to_the_whole_collection(
+    monkeypatch, tmp_path
+):
+    calls = []
+    install_fake_packets(monkeypatch, calls)
     write_packet(tmp_path, 0, 0x209, struct.pack("<I", 0x306))
-    early = bytearray(2572)
-    struct.pack_into("<H", early, 0, 0x306)
-    struct.pack_into("<H", early, 10, 0)
-    write_packet(tmp_path, 1, 0x206, early)
-    write_packet(tmp_path, 2, 0x209, struct.pack("<I", 0x306))
+    write_packet(tmp_path, 1, 0x209, struct.pack("<I", 0x306))
     final = bytearray(2692)
     struct.pack_into("<H", final, 0, 0x306)
     struct.pack_into("<H", final, 10, 0)
-    write_packet(tmp_path, 3, 0x206, final)
+    write_packet(tmp_path, 2, 0x206, final)
 
     collection = Collection(tmp_path)
 
-    assert collection.selected_schema_bindings == ("306-early", "306-final")
-    assert [packet.schema.binding_key for packet in collection.cont] == [
-        "306-early", "306-early", "306-final", "306-final",
-    ]
+    assert collection.selected_schema_bindings == ("306-final",)
+    assert {call["binding"] for call in calls} == {"306-final"}
 
 
 def test_diagnostic_resolution_provenance_reaches_every_packet(monkeypatch, tmp_path):

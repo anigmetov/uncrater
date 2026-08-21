@@ -17,7 +17,7 @@ from .Packet import *
 from .error_utils import *
 from .constants import NPRODUCTS, NCHANNELS
 from .decode_status import DecodeStatus, PacketDecodeError
-from .schema_registry import LATEST_BINDING, SchemaEvidence, SchemaResolution, SchemaResolutionError, resolve_wire_version
+from .schema_registry import SchemaEvidence, SchemaResolutionError, resolve_wire_version
 
 
 # Packet filenames are the only source of acquisition order and the original
@@ -38,13 +38,6 @@ class _PacketRecord:
     mtime: float
 
 
-# A discovered packet paired with its segment-wide schema resolution
-@dataclass(frozen=True)
-class _PlannedPacket:
-    record: _PacketRecord
-    resolution: SchemaResolution
-
-
 # Pending pages and validation state for one calibrator product group
 @dataclass
 class _MultipartState:
@@ -52,7 +45,6 @@ class _MultipartState:
     page_count: int
     pages: dict[int, PacketBase] = field(default_factory=dict)
     unique_packet_id: Optional[int] = None
-    binding_key: Optional[str] = None
     valid: bool = True
 
     @property
@@ -62,7 +54,6 @@ class _MultipartState:
     def clear(self):
         self.pages.clear()
         self.unique_packet_id = None
-        self.binding_key = None
         self.valid = True
 
 
@@ -71,7 +62,6 @@ class _MultipartState:
 class _WaveformState:
     packets: dict[int, Packet_Waveform] = field(default_factory=dict)
     seen: int = 0
-    binding_key: Optional[str] = None
     valid: bool = True
 
     @property
@@ -81,7 +71,6 @@ class _WaveformState:
     def clear(self):
         self.packets.clear()
         self.seen = 0
-        self.binding_key = None
         self.valid = True
 
 
@@ -241,43 +230,38 @@ class Collection:
             ),
         )
 
-    # Require all declared schema versions in one segment to agree
-    def _segment_reported_version(self, records):
-        declarations = [
-            (record, version)
-            for record in records
-            if (version := self._reported_version(record)) is not None
-        ]
-        if not declarations:
-            return None, True
-        first_record, reported_version = declarations[0]
-        for record, version in declarations[1:]:
-            if version != reported_version:
-                self._issue(
-                    "declared_version_mismatch",
-                    f"packet reports schema 0x{version:X}, not session schema 0x{reported_version:X}",
-                    record=record,
-                    details={
-                        "session_source": first_record.basename,
-                        "session_version": reported_version,
-                        "packet_version": version,
-                    },
-                )
-                return reported_version, False
-        return reported_version, True
+    # Resolve one schema binding for the entire collection
+    def _resolve_schema(self, records):
+        first_hello = next(
+            (record for record in records if appid_is_hello(record.appid)),
+            None,
+        )
+        version_record = first_hello
+        if version_record is None:
+            # No-Hello captures retain the first fixed metadata/HK version
+            version_record = next(
+                (
+                    record for record in records
+                    if self._reported_version(record) is not None
+                ),
+                None,
+            )
+        reported_version = (
+            None
+            if version_record is None
+            else self._reported_version(version_record)
+        )
+        self.reported_schema_ids = (
+            () if reported_version is None else (reported_version,)
+        )
 
-    # Resolve one schema binding for a Hello-delimited packet segment
-    def _plan_segment(self, records):
-        # Select one binding from the whole Hello-delimited segment because the
-        # evidence distinguishing the two 306 ABIs may arrive after Hello.
-        reported_version, consistent = self._segment_reported_version(records)
-        if not consistent:
-            return []
+        # The first Hello fixes the version, but 0x306 ABI evidence can occur
+        # later in housekeeping or calibrator metadata.
         evidence = tuple(
             item
             for record in records
             if (item := self._schema_evidence(record)) is not None
-        )
+        ) if reported_version == 0x306 else ()
         try:
             resolution = resolve_wire_version(
                 reported_version,
@@ -286,70 +270,21 @@ class Collection:
                 diagnostic_override=self.diagnostic_override,
             )
         except SchemaResolutionError as exc:
-            # Dispatch is unsafe for the entire segment without one binding.
-            # Non-strict mode records that decision once and skips its files.
-            self._issue(exc.code, str(exc), record=records[0])
-            return []
-        return [_PlannedPacket(record, resolution) for record in records]
+            self._issue(
+                exc.code,
+                str(exc),
+                record=version_record or (records[0] if records else None),
+            )
+            return None
 
-    # Split input at Hello packets and pair every record with its segment binding
-    def _plan_schemas(self, records):
-        if not records:
-            self.selected_schema_ids = (LATEST_BINDING.canonical_schema_id,)
-            self.selected_schema_bindings = (LATEST_BINDING.binding_key,)
-            self.schema_assumed = True
-            return []
-
-        reported = []
-        for record in records:
-            version = self._reported_version(record)
-            if version is not None and version not in reported:
-                reported.append(version)
-        self.reported_schema_ids = tuple(reported)
-
-        segments = []
-        current = []
-        for record in records:
-            if appid_is_hello(record.appid) and current:
-                segments.append(current)
-                current = []
-            current.append(record)
-        if current:
-            segments.append(current)
-        planned = [
-            packet
-            for segment in segments
-            for packet in self._plan_segment(segment)
-        ]
-
-        selected_ids = []
-        selected_bindings = []
-        for packet in planned:
-            binding = packet.resolution.binding
-            if binding.canonical_schema_id not in selected_ids:
-                selected_ids.append(binding.canonical_schema_id)
-            if binding.binding_key not in selected_bindings:
-                selected_bindings.append(binding.binding_key)
-        self.selected_schema_ids = tuple(selected_ids)
-        self.selected_schema_bindings = tuple(selected_bindings)
-        self.schema_assumed = any(packet.resolution.schema_assumed for packet in planned)
-        return planned
+        binding = resolution.binding
+        self.selected_schema_ids = (binding.canonical_schema_id,)
+        self.selected_schema_bindings = (binding.binding_key,)
+        self.schema_assumed = resolution.schema_assumed
+        return resolution
 
     # Accumulate one RawADC channel for association with following metadata
     def _consume_waveform(self, packet, record, state):
-        if not state.active:
-            state.binding_key = packet.schema.binding_key
-        elif state.binding_key != packet.schema.binding_key:
-            state.valid = False
-            self._issue(
-                "declared_version_mismatch",
-                "RawADC group mixes schema bindings",
-                record=record,
-                details={
-                    "first_binding": state.binding_key,
-                    "packet_binding": packet.schema.binding_key,
-                },
-            )
         state.seen += 1
         packet.read()
         if self._packet_usable(packet):
@@ -403,29 +338,6 @@ class Collection:
             )
             return
 
-        schema_matches = state.binding_key == packet.schema.binding_key
-        if not schema_matches:
-            state.valid = False
-            self._issue(
-                "declared_version_mismatch",
-                "RawADC metadata and waveform group use different schemas",
-                record=record,
-                details={
-                    "waveform_binding": state.binding_key,
-                    "metadata_binding": packet.schema.binding_key,
-                },
-            )
-            packet.read()
-            if self._packet_usable(packet):
-                self.waveform_metadata_packets.append(packet)
-            if not state.packets:
-                self._issue(
-                    "raw_adc_metadata_without_usable_waveforms",
-                    "RawADC metadata follows only invalid waveform packets",
-                    record=record,
-                )
-            state.clear()
-            return
         if not state.packets:
             packet.read()
             if self._packet_usable(packet):
@@ -451,7 +363,7 @@ class Collection:
             self.waveform_metadata_packets.append(packet)
         else:
             state.valid = False
-        if state.valid and schema_matches and hasattr(packet, "timestamp"):
+        if state.valid and hasattr(packet, "timestamp"):
             self.waveform_groups.append(
                 {
                     "packets": dict(sorted(state.packets.items())),
@@ -488,7 +400,7 @@ class Collection:
                     "data": data,
                     "gNacc": pages[2].gNacc,
                     "gphase": np.asarray(pages[2].gphase).copy(),
-                    "schema_binding": state.binding_key,
+                    "schema_binding": pages[0].schema.binding_key,
                 }
             )
         elif state.family == "calibrator_raw_pfb":
@@ -504,7 +416,7 @@ class Collection:
                     "unique_packet_id": state.unique_packet_id,
                     "pages": tuple(pages),
                     "data": data,
-                    "schema_binding": state.binding_key,
+                    "schema_binding": pages[0].schema.binding_key,
                 }
             )
         elif state.family == "calibrator_debug":
@@ -513,7 +425,7 @@ class Collection:
                 {
                     "unique_packet_id": state.unique_packet_id,
                     "pages": tuple(pages),
-                    "schema_binding": state.binding_key,
+                    "schema_binding": pages[0].schema.binding_key,
                 }
             )
         state.clear()
@@ -527,13 +439,8 @@ class Collection:
             packet_uid = int(packet.unique_packet_id) if valid_start else None
             if state.active and valid_start and state.unique_packet_id == packet_uid:
                 state.valid = False
-                code = (
-                    "duplicate_multipart_page"
-                    if state.binding_key == packet.schema.binding_key
-                    else "declared_version_mismatch"
-                )
                 self._issue(
-                    code,
+                    "duplicate_multipart_page",
                     f"duplicate {state.family} page 0",
                     record=record,
                     details={"family": state.family, "page": 0},
@@ -544,7 +451,6 @@ class Collection:
             if not valid_start:
                 return
             state.unique_packet_id = packet_uid
-            state.binding_key = packet.schema.binding_key
             state.pages[0] = packet
         else:
             if not state.active or state.unique_packet_id is None:
@@ -568,17 +474,6 @@ class Collection:
                     details={"family": state.family, "page": page},
                 )
                 return
-            if state.binding_key != packet.schema.binding_key:
-                state.valid = False
-                self._issue(
-                    "declared_version_mismatch",
-                    f"{state.family} group mixes schema bindings",
-                    record=record,
-                    details={
-                        "first_binding": state.binding_key,
-                        "packet_binding": packet.schema.binding_key,
-                    },
-                )
             if (not self._packet_usable(packet)
                     or packet.decode_status.has("unique_packet_id_mismatch")):
                 state.valid = False
@@ -720,7 +615,7 @@ class Collection:
         self.packet_counts_by_appid.update(record.original_appid for record in records)
         if not quiet:
             print(f"Analyzing {len(records)} files from {self.dir}.")
-        planned = self._plan_schemas(records)
+        resolution = self._resolve_schema(records)
         meta_packet = None
         tr_spectra = []
         waveform_state = _WaveformState()
@@ -729,8 +624,7 @@ class Collection:
         debug_state = _MultipartState("calibrator_debug", 8)
         multipart_states = (data_state, pfb_state, debug_state)
 
-        for i, item in enumerate(planned):
-            record = item.record
+        for i, record in enumerate(records if resolution is not None else ()):
             if self.verbose:
                 print("Reading ", record.path)
             if appid_is_hello(record.appid):
@@ -742,7 +636,6 @@ class Collection:
                 )
                 meta_packet = None
 
-            resolution = item.resolution
             packet = Packet(
                 record.original_appid,
                 blob_fn=str(record.path),

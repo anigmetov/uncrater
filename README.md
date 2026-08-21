@@ -59,15 +59,18 @@ binding = binding_for_wire_version(
 )
 ```
 
-If a session has no usable version evidence, decoding uses the latest binding
+If a collection has no usable version evidence, decoding uses the latest binding
 and records that the schema was assumed. Structural errors raise
 `PacketDecodeError` by default; `strict=False` records machine-readable issues
 in `decode_status` without fabricating valid-looking data.
 
-`Collection` orders packet files deterministically and validates session and
-multipart boundaries. RawADC is intentionally different from normal spectra:
-coreloop emits waveform metadata after the waveform group, so Collection
-associates that metadata with the preceding waveforms.
+`Collection` orders packet files deterministically and uses the first Hello to
+select one schema for the entire directory. When there is no Hello, it falls
+back to the first fixed packet-version prefix. The 0x306 layouts still require
+structural housekeeping or calibrator evidence because both report the same
+version. RawADC is intentionally different from normal spectra: coreloop emits
+waveform metadata after the waveform group, so Collection associates that
+metadata with the preceding waveforms.
 
 ## Decoder tests
 

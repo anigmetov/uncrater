@@ -674,7 +674,7 @@ def build_tree_decoder_report(
 
 
 def collection_outcome(collection: Collection, tree: CorpusTree) -> str:
-    """Classify a non-strict decode, including segments skipped as unsafe."""
+    """Classify a non-strict decode, including a collection skipped as unsafe."""
 
     if tree.file_count == 0:
         return "empty"
