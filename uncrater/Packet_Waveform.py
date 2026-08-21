@@ -23,17 +23,17 @@ class Packet_Waveform(PacketBase):
         self.ch = ch
         self._is_read = True
         self.timestamp = 0xFFFFFFFFFFFFFFFF
-        self.meta = None                
+        self.meta = None
 
     def info (self):
         self._read()
-        desc = f"Raw waveform for channel {self.ch}\n"        
+        desc = f"Raw waveform for channel {self.ch}\n"
         desc += f"Min value: {self.waveform.min()}\n"
         desc += f"Max value: {self.waveform.max()}\n"
         desc += f"Mean value: {self.waveform.mean()}\n"
         desc += f"ADC Time: {self.timestamp}\n"
         return desc
-    
+
 
 class Packet_Waveform_Meta(PacketBase):
     @property
@@ -46,7 +46,7 @@ class Packet_Waveform_Meta(PacketBase):
         if any(issue.fatal for issue in self.decode_status.issues):
             return
         # Coreloop emits metadata after waveforms, so it annotates packets already decoded
-        for i,p in enumerate(self.packets):
+        for p in self.packets:
             if p is not None:
                 p.timestamp = self.timestamp
                 p.meta = self
