@@ -20,11 +20,14 @@ from .decode_status import DecodeStatus, PacketDecodeError
 from .schema_registry import LATEST_BINDING, SchemaEvidence, SchemaResolution, SchemaResolutionError, resolve_wire_version
 
 
+# Packet filenames are the only source of acquisition order and the original
+# AppID, so reject names that cannot provide both values unambiguously
 PACKET_FILENAME_RE = re.compile(
     r"^(?P<packet_index>[0-9]+)(?:_[^/]*)?_(?P<appid>[0-9A-Fa-f]+)\.bin$"
 )
 
 
+# A discovered packet's parsed filename and filesystem metadata
 @dataclass(frozen=True)
 class _PacketRecord:
     path: Path
@@ -35,12 +38,14 @@ class _PacketRecord:
     mtime: float
 
 
+# A discovered packet paired with its segment-wide schema resolution
 @dataclass(frozen=True)
 class _PlannedPacket:
     record: _PacketRecord
     resolution: SchemaResolution
 
 
+# Pending pages and validation state for one calibrator product group
 @dataclass
 class _MultipartState:
     family: str
@@ -61,6 +66,7 @@ class _MultipartState:
         self.valid = True
 
 
+# Pending RawADC channels awaiting their following metadata packet
 @dataclass
 class _WaveformState:
     packets: dict[int, Packet_Waveform] = field(default_factory=dict)
@@ -83,6 +89,16 @@ class Collection:
 
     def __init__(self, dir, verbose = False, cut_to_hello = False, *,
                  strict=True, diagnostic_override=False, schema_variant=None):
+        """Decode and assemble the packet files in a CDI directory.
+
+        dir names the directory; verbose prints packet-level progress, and
+        cut_to_hello discards everything before the last Hello packet.
+        strict raises on the first fatal decode or assembly issue; otherwise
+        fatal issues are recorded and invalid products are skipped.
+        diagnostic_override permits an unknown reported version to use the
+        latest schema while recording that assumption. schema_variant names an
+        expected 0x306 layout and must agree with structural packet evidence.
+        """
         self.verbose = verbose
         self.dir = dir
         self.cut_to_hello = cut_to_hello
@@ -91,6 +107,7 @@ class Collection:
         self.schema_variant = schema_variant
         self.refresh()
 
+    # Initialize decoded products, compatibility arrays, and status summaries
     def _reset_outputs(self):
         self.cont = []
         self.time = []
@@ -135,26 +152,7 @@ class Collection:
         ):
             setattr(self, name, np.array([]))
 
-    def _issue(self, code, message, *, record=None, fatal=True, details=None):
-        # Assembly failures have no single owning packet, so this records them
-        # on the collection and applies the same strict/non-strict policy.
-        issue = self.decode_status.add(
-            code,
-            message,
-            appid=None if record is None else record.original_appid,
-            source=None if record is None else record.basename,
-            fatal=fatal,
-            details=details,
-        )
-        if fatal and self.strict:
-            raise PacketDecodeError(issue, self.decode_status)
-
-    @staticmethod
-    def _packet_usable(packet):
-        # Diagnostic findings keep decoded fields available; only fatal issues
-        # make a packet unsafe to assemble into a collection product.
-        return not any(issue.fatal for issue in packet.decode_status.issues)
-
+    # Parse and deterministically order packets, optionally trimming pre-Hello data
     def _discover(self):
         records = []
         for fn in glob.glob(os.path.join(self.dir, "*.bin")):
@@ -206,6 +204,7 @@ class Collection:
                 )
         return records
 
+    # Read only the fixed header bytes needed during schema planning
     @staticmethod
     def _read_prefix(record, size):
         try:
@@ -214,6 +213,7 @@ class Collection:
         except OSError:
             return b""
 
+    # Extract a fixed-position reported schema version when the packet has one
     def _reported_version(self, record):
         if appid_is_hello(record.appid):
             prefix = self._read_prefix(record, 4)
@@ -225,6 +225,7 @@ class Collection:
             return struct.unpack_from("<H", prefix, 0)[0] if len(prefix) == 2 else None
         return None
 
+    # Build ABI-discriminating evidence from packet kind, length, and subtype
     def _schema_evidence(self, record):
         if not (appid_is_housekeeping(record.appid)
                 or appid_is_cal_metadata(record.appid)):
@@ -240,6 +241,7 @@ class Collection:
             ),
         )
 
+    # Require all declared schema versions in one segment to agree
     def _segment_reported_version(self, records):
         declarations = [
             (record, version)
@@ -264,6 +266,7 @@ class Collection:
                 return reported_version, False
         return reported_version, True
 
+    # Resolve one schema binding for a Hello-delimited packet segment
     def _plan_segment(self, records):
         # Select one binding from the whole Hello-delimited segment because the
         # evidence distinguishing the two 306 ABIs may arrive after Hello.
@@ -289,6 +292,7 @@ class Collection:
             return []
         return [_PlannedPacket(record, resolution) for record in records]
 
+    # Split input at Hello packets and pair every record with its segment binding
     def _plan_schemas(self, records):
         if not records:
             self.selected_schema_ids = (LATEST_BINDING.canonical_schema_id,)
@@ -331,33 +335,7 @@ class Collection:
         self.schema_assumed = any(packet.resolution.schema_assumed for packet in planned)
         return planned
 
-    def _flush_waveforms(self, state, *, boundary, record):
-        if state.active:
-            self._issue(
-                "orphan_waveform_group",
-                f"RawADC group without following metadata at {boundary}",
-                record=record,
-                details={"channels": sorted(state.packets), "packets_seen": state.seen},
-            )
-            state.clear()
-
-    def _flush_multipart(self, state, *, boundary, record):
-        if not state.active:
-            return
-        missing = sorted(set(range(state.page_count)) - set(state.pages))
-        self._issue(
-            "missing_multipart_page",
-            f"incomplete {state.family} group at {boundary}; missing pages {missing}",
-            record=record,
-            details={"family": state.family, "missing_pages": missing},
-        )
-        state.clear()
-
-    def _flush_boundaries(self, waveform_state, multipart_states, *, boundary, record):
-        self._flush_waveforms(waveform_state, boundary=boundary, record=record)
-        for state in multipart_states:
-            self._flush_multipart(state, boundary=boundary, record=record)
-
+    # Accumulate one RawADC channel for association with following metadata
     def _consume_waveform(self, packet, record, state):
         if not state.active:
             state.binding_key = packet.schema.binding_key
@@ -412,6 +390,7 @@ class Collection:
             return
         state.packets[channel] = packet
 
+    # Validate and publish the waveform group completed by this metadata packet
     def _consume_waveform_metadata(self, packet, record, state):
         if not state.active:
             packet.read()
@@ -482,6 +461,7 @@ class Collection:
             )
         state.clear()
 
+    # Map a calibrator AppID to its zero-based page within the pending group
     @staticmethod
     def _multipart_page(packet, state):
         if isinstance(packet, Packet_Cal_Data):
@@ -492,6 +472,7 @@ class Collection:
             return packet.appid - int(packet.schema.appids.AppID_Calibrator_Debug)
         raise TypeError(f"{state.family} received an incompatible packet")
 
+    # Publish a complete valid calibrator group to structured and legacy outputs
     def _publish_multipart(self, state):
         pages = [state.pages[page] for page in range(state.page_count)]
         if not state.valid or not all(self._packet_usable(packet) for packet in pages):
@@ -537,6 +518,7 @@ class Collection:
             )
         state.clear()
 
+    # Validate and accumulate one calibrator page, publishing on completion
     def _consume_multipart(self, packet, record, state):
         page = self._multipart_page(packet, state)
         if page == 0:
@@ -604,10 +586,9 @@ class Collection:
         if len(state.pages) == state.page_count:
             self._publish_multipart(state)
 
+    # Rebuild typed counters when older bindings expose raw error_regs bytes
     @staticmethod
     def _debug_error_register(packet):
-        """Rebuild typed counters when older bindings expose raw error_regs bytes."""
-
         metadata = getattr(packet, "metadata", None)
         if metadata is None:
             return None
@@ -628,9 +609,8 @@ class Collection:
             return error
         return None
 
+    # Populate legacy arrays only from complete validated multipart groups
     def _finalize_compatibility_arrays(self):
-        """Populate legacy arrays only from complete validated multipart groups."""
-
         if self.calibrator_data_groups:
             self.calib_data = np.asarray(
                 [group["data"] for group in self.calibrator_data_groups]
@@ -720,21 +700,7 @@ class Collection:
         ]
         self.grimm_spectra = np.vstack(grimm) if grimm else []
 
-    def _update_summaries(self):
-        for packet in self.cont:
-            self.decode_status.extend(packet.decode_status.issues)
-        self.invalid_counts_by_issue = Counter(self.decode_status.codes)
-        boundary_codes = {
-            "orphan_multipart_page", "missing_multipart_page",
-            "duplicate_multipart_page", "orphan_waveform_group",
-            "raw_adc_metadata_without_waveforms",
-            "raw_adc_metadata_without_usable_waveforms",
-        }
-        self.orphan_multipart_failures = sum(
-            count for code, count in self.invalid_counts_by_issue.items()
-            if code in boundary_codes
-        )
-
+    # Append one decoded packet to the legacy packet/time/description arrays
     def _append_packet(self, packet, record, ordinal):
         self.cont.append(packet)
         self.time.append(record.mtime)
@@ -744,6 +710,11 @@ class Collection:
         )
 
     def refresh(self, quiet=False):
+        """Re-read the directory and rebuild every decoded collection product.
+
+        quiet suppresses the initial file-count message.
+        """
+
         self._reset_outputs()
         records = self._discover()
         self.packet_counts_by_appid.update(record.original_appid for record in records)
@@ -854,30 +825,38 @@ class Collection:
             print('# of calib debug entries', len(self.calib_debug))
 
     def __len__(self):
+        """Return the number of decoded packet records in the collection."""
+
         return len(self.cont)
 
-    # return number of spectra packets received
     def num_spectra_packets(self) -> int:
+        """Return the number of assembled normal-spectrum groups."""
+
         return len(self.spectra)
 
-    # return number of time resolved spectra packets received
     def num_tr_spectra_packets(self) -> int:
+        """Return the number of assembled time-resolved spectrum groups."""
+
         return len(self.tr_spectra)
 
-    # return number of heartbeat packets received
     def num_heartbeats(self) -> int:
+        """Return the number of usable heartbeat packets."""
+
         return len(self.heartbeat_packets)
 
-    # return number of housekeeping packets received
     def num_housekeeping_packets(self) -> int:
+        """Return the number of usable housekeeping packets."""
+
         return len(self.housekeeping_packets)
 
-    # return number of waveform packets received
     def num_waveform_packets(self) -> int:
+        """Return the number of usable RawADC waveform packets."""
+
         return len(self.waveform_packets)
 
-    # return 1, if all heartbeat packets are present (no gaps in packet_count sequence)
     def heartbeat_counter_ok(self) -> int:
+        """Return 1 when heartbeat counters have no unexplained gaps."""
+
         hb_counts = [p.packet_count for p in self.heartbeat_packets]
         if len(hb_counts) <= 1:
             return 1
@@ -895,18 +874,18 @@ class Collection:
 
         return 1
 
-    # return maximal time difference between heartbeat packets
-    # return -1, if there is at 0 or 1 heartbeat
     def heartbeat_max_dt(self) -> int:
+        """Return the largest heartbeat time gap, or -1 with fewer than two."""
+
         if len(self.heartbeat_packets) <= 1:
             return -1
         hb_times = [p.time for p in self.heartbeat_packets]
         deltas = [t2 - t1 for t2, t1 in zip(hb_times[1:], hb_times[:-1])]
         return max(deltas)
 
-    # return minimal time difference between heartbeat packets
-    # return 1e12, if there is 0 or 1 heartbeat
     def heartbeat_min_dt(self) -> int:
+        """Return the smallest heartbeat time gap, or 1e12 with fewer than two."""
+
         if len(self.heartbeat_packets) <= 1:
             return int(1e12)
         hb_times = [p.time for p in self.heartbeat_packets]
@@ -914,8 +893,11 @@ class Collection:
         return min(deltas)
 
     def list(self):
+        """Return one receipt-time description line per decoded packet."""
+
         return "\n".join(self.desc)
 
+    # Format receipt information for one packet
     def _intro(self, i):
         desc = f"Packet #{i}\n"
         received_time = datetime.fromtimestamp(self.time[i])
@@ -924,13 +906,16 @@ class Collection:
         return desc
 
     def info(self, i, intro=False):
+        """Return packet information, optionally prefixed with receipt details."""
+
         if intro:
             return self._intro(i) + self.cont[i].info()
         return self.cont[i].info()
 
     # bcheckmark in TeX want an int 0/1 flag, not bool
-    # return 1, if all 16 products are present
     def has_all_products(self) -> int:
+        """Return 1 when every normal-spectrum group has all products."""
+
         for s, prods in enumerate(self.spectra):
             for i in range(NPRODUCTS):
                 if i not in prods:
@@ -938,8 +923,9 @@ class Collection:
                     return 0
         return 1
 
-    # return 1, if all 16 time-resolved packets are present
     def has_all_tr_products(self) -> int:
+        """Return 1 when every time-resolved group has all products."""
+
         for s, trs in enumerate(self.tr_spectra):
             for i in range(NPRODUCTS):
                 if i not in trs:
@@ -947,8 +933,9 @@ class Collection:
                     return 0
         return 1
 
-    # return 1, if all spectra packets have correct CRC
     def all_spectra_crc_ok(self) -> int:
+        """Return 1 when every present normal-spectrum packet has a valid CRC."""
+
         for i, prods in enumerate(self.spectra):
             for k in range(NPRODUCTS):
                 if k in prods and prods[k].error_crc_mismatch:
@@ -956,8 +943,9 @@ class Collection:
                     return 0
         return 1
 
-    # return 1, if all time-resolved spectra packets have correct CRC
     def all_tr_spectra_crc_ok(self) -> int:
+        """Return 1 when every present time-resolved packet has a valid CRC."""
+
         for i, trs in enumerate(self.tr_spectra):
             for k in range(NPRODUCTS):
                 if k in trs and trs[k].error_crc_mismatch:
@@ -969,6 +957,8 @@ class Collection:
 
 
     def all_meta_error_free(self) -> int:
+        """Return 1 when every normal-spectrum metadata error mask is clear."""
+
         result = 1
         for i, sp in enumerate(self.spectra):
             if sp["meta"].errormask:
@@ -977,19 +967,20 @@ class Collection:
         return result
 
     def get_meta(self,name):
+        """Return one named metadata value from each normal-spectrum group."""
+
         return np.array([S['meta'][name] for S in self.spectra])
 
 
     def xxd(self, i, intro=False):
+        """Return a packet hex dump, optionally prefixed with receipt details."""
+
         if intro:
             return self._intro(i) + self.cont[i].xxd()
         return self.cont[i].xxd()
 
     def np_spectra(self, ndx=None, channel=None):
-        """ Returns a numpy array of the spectra data.
-            If ndx is not None, returns only the spectra at that time.
-            If channel is not None, returns only the spectra for that channel.
-        """
+        """Return normal spectra, optionally selecting one group or channel."""
 
         if (ndx is None) and (channel is None):        
             return np.array([[S[ch].data for ch in range(NPRODUCTS)] for S in self.spectra])
@@ -1008,10 +999,9 @@ class Collection:
         assert(False), "Should not reach here"
 
     def np_tr_spectra(self, ndx=None, product: Optional[int]=None, *, channel: Optional[int]=None):
-        """ Returns a numpy array of the spectra data.
-            If ndx is not None, returns only the spectra at that time.
-            If product is not None, returns only the spectra for that channel.
-            The legacy channel keyword is an alias for product.
+        """Return time-resolved spectra, optionally selecting a group or product.
+
+        channel is the legacy alias for product.
         """
 
         if product is not None and channel is not None:
@@ -1043,3 +1033,75 @@ class Collection:
 
         from .collection_report import canonical_report
         return canonical_report(self)
+
+    # -------------------------------------------------------------------------
+    # Error handling and diagnostics
+    # -------------------------------------------------------------------------
+
+    # Record an assembly issue and apply the collection's strict-mode policy
+    def _issue(self, code, message, *, record=None, fatal=True, details=None):
+        # Assembly failures have no single owning packet, so this records them
+        # on the collection and applies the same strict/non-strict policy.
+        issue = self.decode_status.add(
+            code,
+            message,
+            appid=None if record is None else record.original_appid,
+            source=None if record is None else record.basename,
+            fatal=fatal,
+            details=details,
+        )
+        if fatal and self.strict:
+            raise PacketDecodeError(issue, self.decode_status)
+
+    # Accept packets with diagnostics, but not packets with fatal decode issues
+    @staticmethod
+    def _packet_usable(packet):
+        # Diagnostic findings keep decoded fields available; only fatal issues
+        # make a packet unsafe to assemble into a collection product.
+        return not any(issue.fatal for issue in packet.decode_status.issues)
+
+    # Reject a waveform group left incomplete at a session boundary
+    def _flush_waveforms(self, state, *, boundary, record):
+        if state.active:
+            self._issue(
+                "orphan_waveform_group",
+                f"RawADC group without following metadata at {boundary}",
+                record=record,
+                details={"channels": sorted(state.packets), "packets_seen": state.seen},
+            )
+            state.clear()
+
+    # Reject a calibrator group left incomplete at a session boundary
+    def _flush_multipart(self, state, *, boundary, record):
+        if not state.active:
+            return
+        missing = sorted(set(range(state.page_count)) - set(state.pages))
+        self._issue(
+            "missing_multipart_page",
+            f"incomplete {state.family} group at {boundary}; missing pages {missing}",
+            record=record,
+            details={"family": state.family, "missing_pages": missing},
+        )
+        state.clear()
+
+    # Flush every pending multipart family at Hello, EOS, or end of input
+    def _flush_boundaries(self, waveform_state, multipart_states, *, boundary, record):
+        self._flush_waveforms(waveform_state, boundary=boundary, record=record)
+        for state in multipart_states:
+            self._flush_multipart(state, boundary=boundary, record=record)
+
+    # Merge packet issues and update collection-level diagnostic counters
+    def _update_summaries(self):
+        for packet in self.cont:
+            self.decode_status.extend(packet.decode_status.issues)
+        self.invalid_counts_by_issue = Counter(self.decode_status.codes)
+        boundary_codes = {
+            "orphan_multipart_page", "missing_multipart_page",
+            "duplicate_multipart_page", "orphan_waveform_group",
+            "raw_adc_metadata_without_waveforms",
+            "raw_adc_metadata_without_usable_waveforms",
+        }
+        self.orphan_multipart_failures = sum(
+            count for code, count in self.invalid_counts_by_issue.items()
+            if code in boundary_codes
+        )
