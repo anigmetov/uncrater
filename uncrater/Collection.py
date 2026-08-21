@@ -560,18 +560,17 @@ class Collection:
             self.cd_snr2 = np.hstack([c[7].snr2 for c in dcalib])
             self.cd_snr3 = np.hstack([c[7].snr3 for c in dcalib])
 
-        # we take drift packets for both debug and metadata but make sure we don't duplicate
+        # Drift is the calibrator's tracked phase increment in radians, proportional
+        # to frequency offset. Metadata is full in v203 and sampled every eighth
+        # point in later schemas; page 0 of a complete debug group is always full.
         drift_packets = [
             packet for packet in self.cont
             if (
-                (
-                    isinstance(packet, Packet_Cal_Metadata)
-                    and self._packet_usable(packet)
-                )
-                or (
-                    isinstance(packet, Packet_Cal_Debug)
-                    and packet in complete_starts
-                )
+                isinstance(packet, Packet_Cal_Metadata)
+                and self._packet_usable(packet)
+            ) or (
+                isinstance(packet, Packet_Cal_Debug)
+                and packet in complete_starts
             )
         ]
         if drift_packets:
