@@ -16,6 +16,54 @@ def cdi_rounded_size(size):
     return (size + 3) & ~3
 
 
+# Resolve constructor inputs while preserving an explicitly selected binding
+def _resolve_packet_schema(*, version, schema, reported_version,
+                           schema_variant, evidence, diagnostic_override):
+    if (reported_version is not None and version is not None
+            and reported_version != version):
+        raise SchemaConflictError("version and reported_version disagree")
+    if reported_version is None:
+        reported_version = version
+
+    if schema is None:
+        resolution = resolve_wire_version(
+            reported_version,
+            variant=schema_variant,
+            evidence=evidence,
+            diagnostic_override=diagnostic_override,
+        )
+        return resolution.binding, reported_version, resolution.schema_assumed
+
+    has_evidence = evidence is not None or schema_variant is not None
+    needs_resolution = (
+        has_evidence
+        or (
+            reported_version is not None
+            and reported_version not in schema.accepted_reported_versions
+        )
+    )
+    if not needs_resolution:
+        return schema, reported_version, reported_version is None
+
+    resolution = resolve_wire_version(
+        reported_version,
+        variant=schema_variant,
+        evidence=evidence,
+        diagnostic_override=diagnostic_override,
+    )
+    if resolution.binding is not schema:
+        if has_evidence:
+            raise SchemaConflictError(
+                f"Packet evidence selects {resolution.binding.binding_key}, "
+                f"not {schema.binding_key}"
+            )
+        raise SchemaConflictError(
+            f"Reported version 0x{reported_version:X} does not match "
+            f"binding {schema.binding_key}"
+        )
+    return schema, reported_version, resolution.schema_assumed
+
+
 class PacketBase:
     def __init__ (self, appid, blob = None, blob_fn = None, version=None,
                   schema=None, reported_version=None, schema_variant=None,
@@ -31,51 +79,14 @@ class PacketBase:
         self.decode_status = DecodeStatus()
         self._diagnostic_override = diagnostic_override
 
-        if (reported_version is not None and version is not None
-                and reported_version != version):
-            raise SchemaConflictError("version and reported_version disagree")
-        if reported_version is None:
-            reported_version = version
-        if schema is None:
-            resolution = resolve_wire_version(
-                reported_version,
-                variant=schema_variant,
-                evidence=evidence,
-                diagnostic_override=diagnostic_override,
-            )
-            schema = resolution.binding
-            resolved_schema_assumed = resolution.schema_assumed
-        else:
-            resolved_schema_assumed = (
-                reported_version is None
-                or reported_version not in schema.accepted_reported_versions
-            )
-            if evidence is not None or schema_variant is not None:
-                resolution = resolve_wire_version(
-                    reported_version,
-                    variant=schema_variant,
-                    evidence=evidence,
-                    diagnostic_override=diagnostic_override,
-                )
-                if resolution.binding is not schema:
-                    raise SchemaConflictError(
-                        f"Packet evidence selects {resolution.binding.binding_key}, "
-                        f"not {schema.binding_key}"
-                    )
-                resolved_schema_assumed = resolution.schema_assumed
-            if (reported_version is not None
-                    and reported_version not in schema.accepted_reported_versions
-                    and evidence is None and schema_variant is None):
-                resolution = resolve_wire_version(
-                    reported_version,
-                    diagnostic_override=diagnostic_override,
-                )
-                if resolution.binding is not schema:
-                    raise SchemaConflictError(
-                        f"Reported version 0x{reported_version:X} does not match "
-                        f"binding {schema.binding_key}"
-                    )
-                resolved_schema_assumed = resolution.schema_assumed
+        schema, reported_version, resolved_schema_assumed = _resolve_packet_schema(
+            version=version,
+            schema=schema,
+            reported_version=reported_version,
+            schema_variant=schema_variant,
+            evidence=evidence,
+            diagnostic_override=diagnostic_override,
+        )
 
         # Keep the on-wire report separate from the frozen decoder selected for it
         self.schema = schema
