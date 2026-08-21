@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from uncrater.PacketBase import PacketBase
+from uncrater.PacketBase import PacketBase, Packet_Unsupported
 from uncrater.Packet_Hello import Packet_Hello
 from uncrater.Packet_Housekeep import Packet_Housekeep
 from uncrater.Packet_Spectrum import Packet_Metadata, Packet_Spectrum
@@ -148,6 +148,15 @@ def test_factory_normalizes_only_dcb_waveform_appid():
     assert type(untouched) is PacketBase
     assert untouched.appid == 0x4F1
     assert untouched.original_appid == 0x4F1
+
+
+@pytest.mark.parametrize("appid", range(0x2E0, 0x2E4))
+def test_fw_direct_spectra_are_explicitly_unsupported(appid):
+    packet = packet_module.Packet(appid, blob=b"payload", strict=False)
+
+    assert type(packet) is Packet_Unsupported
+    assert packet.decode_status.codes == ("unsupported_format",)
+    assert not hasattr(packet, "data")
 
 
 @pytest.mark.parametrize(

@@ -118,6 +118,26 @@ class PacketBase:
             return b""
         return self._blob
 
+    @property
+    def is_read(self):
+        return self._is_read
+
+    @property
+    def error_crc_mismatch(self):
+        return self.decode_status.has("crc_mismatch")
+
+    @property
+    def error_packed_id_mismatch(self):
+        return self.decode_status.has("unique_packet_id_mismatch")
+
+    @property
+    def packed_id_mismatch(self):
+        return self.error_packed_id_mismatch
+
+    @property
+    def error_data_read(self):
+        return self.decode_status.has("payload_decode_failed")
+
     def _context(self):
         return {
             "appid": self.appid,
@@ -317,3 +337,19 @@ class PacketBase:
             if attr[0] == '_':
                 continue
             setattr(self, attr, getattr(src, attr))
+
+
+class Packet_Unsupported(PacketBase):
+    @property
+    def desc(self):
+        return "Unsupported packet"
+
+    def _read(self):
+        if self._is_read:
+            return
+        if not self._load_blob():
+            return
+        self._fail(
+            "unsupported_format",
+            f"decoding for AppID 0x{self.appid:03X} is not implemented",
+        )

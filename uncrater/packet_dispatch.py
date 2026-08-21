@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from .appids import normalize_dcb_appid
 from .constants import NPRODUCTS
-from .PacketBase import PacketBase
+from .PacketBase import PacketBase, Packet_Unsupported
 from .Packet_Bootloader import Packet_Bootloader
 from .Packet_Calibrator import Packet_Cal_Data, Packet_Cal_Debug, Packet_Cal_Metadata, Packet_Cal_RawPFB, Packet_Cal_ZoomSpectra
 from .Packet_EOS import Packet_EOS
@@ -58,6 +58,7 @@ def packet_dict_for_binding(binding_key):
     ):
         add_range(packet_types, binding_id, constant_name, NPRODUCTS, Packet_TR_Spectrum)
     add_range(packet_types, binding_id, "AppID_RawADC", 4, Packet_Waveform)
+    add_range(packet_types, binding_id, "AppID_FW_DirectSpectrum", 4, Packet_Unsupported)
     add_range(packet_types, binding_id, "AppID_Calibrator_Data", 3, Packet_Cal_Data)
     add_range(packet_types, binding_id, "AppID_Calibrator_RawPFB", 8, Packet_Cal_RawPFB)
     add_range(packet_types, binding_id, "AppID_Calibrator_Debug", 8, Packet_Cal_Debug)

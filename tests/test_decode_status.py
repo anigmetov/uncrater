@@ -2,7 +2,7 @@ import ctypes
 
 import pytest
 
-from uncrater.PacketBase import PacketBase, cdi_rounded_size
+from uncrater.PacketBase import PacketBase, Packet_Unsupported, cdi_rounded_size
 from uncrater.decode_status import DecodeStatus, PacketDecodeError
 
 
@@ -106,3 +106,10 @@ def test_diagnostic_unknown_schema_records_the_selected_fallback():
 def test_managed_decode_contract_fields_cannot_arrive_as_payload_attributes(keyword):
     with pytest.raises(TypeError, match="managed by PacketBase"):
         PacketBase(0x999, blob=b"", **{keyword: object()})
+
+
+def test_unsupported_packet_uses_structural_failure_policy():
+    packet = Packet_Unsupported(0x2E0, blob=b"payload", strict=False)
+
+    assert packet.decode_status.codes == ("unsupported_format",)
+    assert not hasattr(packet, "data")

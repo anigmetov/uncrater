@@ -1,4 +1,5 @@
-from .PacketBase import PacketBase, pystruct
+from .PacketBase import PacketBase
+from .utils import Time2Time
 import struct
 import numpy as np
 
@@ -12,17 +13,20 @@ class Packet_Waveform(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        super()._read()
-        fmt = "16384H"
-        try:
-            self.waveform = np.array(struct.unpack(fmt, self._blob))
-        except struct.error as e:
-            print (f"Wrong packet size in waveform!! Ignoring: {e}")
-            self.waveform = np.zeros(16384, dtype=np.uint16)
-        self.waveform[self.waveform>8192] -= 16384 
-        self.ch = self.appid - 0x2f0
-        if self.ch>=512:
-            self.ch -= 512
+        if not self._validate_length(2 * 16384, allow_cdi_padding=False):
+            return
+        ch = self.appid - int(self.schema.appids.AppID_RawADC)
+        if not 0 <= ch < 4:
+            self._fail(
+                "unsupported_format",
+                f"waveform AppID implies invalid channel {ch}",
+            )
+            return
+        waveform = np.frombuffer(self._blob, dtype="<u2", count=16384).astype(np.int32)
+        # Coreloop encodes negative samples as 16384 + value, including -8192 as code 8192
+        waveform[waveform>=8192] -= 16384
+        self.waveform = waveform.astype(np.int16)
+        self.ch = ch
         self._is_read = True
         self.timestamp = 0xFFFFFFFFFFFFFFFF
         self.meta = None                
@@ -45,6 +49,9 @@ class Packet_Waveform_Meta(PacketBase):
     def set_packets(self, packets):
         self.packets = packets
         self._read()
+        if any(issue.fatal for issue in self.decode_status.issues) or not hasattr(self, "timestamp"):
+            return
+        # Coreloop emits metadata after waveforms, so it annotates packets already decoded
         for i,p in enumerate(self.packets):
             if p is not None:
                 p.timestamp = self.timestamp
@@ -53,8 +60,16 @@ class Packet_Waveform_Meta(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        super()._read()
-        self.copy_attrs(pystruct.waveform_metadata.from_buffer_copy(self._blob))
-        self.is_read=True
-
-
+        struct_type = getattr(self.schema.pystruct, "waveform_metadata", None)
+        if struct_type is None:
+            self._fail(
+                "unsupported_format",
+                f"waveform metadata is unavailable in binding {self.schema.binding_key}",
+            )
+            return
+        attrs = self._decode_struct(struct_type)
+        if attrs is None:
+            return
+        self.copy_attrs(attrs)
+        self.time = Time2Time(self.time_32, self.time_16)
+        self._is_read = True

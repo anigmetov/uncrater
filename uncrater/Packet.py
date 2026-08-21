@@ -10,7 +10,7 @@ appId_from_value = pycoreloop.appId_from_value
 value_from_appId = pycoreloop.value_from_appId
     
 
-from .PacketBase import PacketBase
+from .PacketBase import PacketBase, Packet_Unsupported
 from .Packet_Hello import Packet_Hello
 from .Packet_Heartbeat import Packet_Heartbeat
 from .Packet_Housekeep import Packet_Housekeep
@@ -50,6 +50,7 @@ for i in range(NPRODUCTS):
     PacketDict[id.AppID_SpectraTRLow + i] = Packet_TR_Spectrum
 
 for i in range(4):
+    PacketDict[id.AppID_FW_DirectSpectrum + i] = Packet_Unsupported
     PacketDict[id.AppID_RawADC + i] = Packet_Waveform
     
 for i in range(8):
