@@ -37,6 +37,76 @@ pinned coreloop source checkout. The hardware commander/test harness may use
 an explicitly configured coreloop checkout; this is separate from runtime
 packet decoding.
 
+## Decoder behavior
+
+Packets are dispatched using both their AppID and selected wire schema. The
+package contains frozen bindings for `0x203`, `0x305`, the verified early and
+final `0x306` layouts, and the latest shipped `0x307` layout. Known but
+unverified schemas (`0x300`, `0x302`, `0x308`, and `0x309`) fail closed.
+Because `0x306` names two different ABIs, it requires a verified variant or
+discriminating packet evidence:
+
+```python
+from uncrater.schema_registry import SchemaEvidence, binding_for_wire_version
+
+binding = binding_for_wire_version(
+    0x306,
+    evidence=SchemaEvidence(
+        appid=0x206,
+        payload_length=2571,
+        housekeeping_type=0,
+    ),
+)
+```
+
+If a session has no usable version evidence, decoding uses the latest binding
+and records that the schema was assumed. Structural errors raise
+`PacketDecodeError` by default; `strict=False` records machine-readable issues
+in `decode_status` without fabricating valid-looking data.
+
+`Collection` orders packet files deterministically and validates session and
+multipart boundaries. RawADC is intentionally different from normal spectra:
+coreloop emits waveform metadata after the waveform group, so Collection
+associates that metadata with the preceding waveforms.
+
+## Decoder tests
+
+The public test suite creates packet bytes synthetically and never uses the
+private CDI corpus:
+
+```bash
+python3 -m pip install ".[test]"
+python3 -m pytest -m "not real_data"
+```
+
+ABI, vendoring, and compression-parity checks additionally require the
+`vendor` extra and a coreloop Git checkout containing the pinned commits:
+
+```bash
+python3 -m pip install ".[test,vendor]"
+CORELOOP_DIR=/path/to/coreloop python3 scripts/vendor_coreloop.py --coreloop /path/to/coreloop --check
+cmake -S /path/to/coreloop -B /path/to/coreloop/build
+cmake --build /path/to/coreloop/build --target cl_utils --parallel
+CORELOOP_DIR=/path/to/coreloop python3 -m pytest tests/test_abi.py test/standalone/test_coreloop_parity.py
+```
+
+Private real-CDI tests read only the root named by `UNCRATER_CDI_CORPUS`; they
+never discover or populate a corpus. With that variable unset they skip, and
+`--require-cdi-corpus` turns the missing corpus into an error. Release
+qualification selects the full tier and fails if any expectation is still
+uncurated:
+
+```bash
+UNCRATER_CDI_CORPUS=/private/cdi-corpus python3 -m pytest tests/real_data --cdi-tier full --require-cdi-corpus
+```
+
+All 127 policies in the current private corpus are still uncurated, so this
+full qualification command is expected to fail until their expectations have
+been reviewed independently of uncrater.
+
+The emulator integration workflow is separate from public tests and runs only
+when started explicitly with GitHub Actions `workflow_dispatch`.
+
 ## Development and hardware dependencies
 
 ### Linux packages
