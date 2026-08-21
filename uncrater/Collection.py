@@ -743,7 +743,7 @@ class Collection:
                 ## great
                 continue
             elif (j<i) or (i==0):
-                # then we must have seen a re boot  
+                # then we must have seen a re boot
                 if j==0:
                     continue
             else:
@@ -860,20 +860,20 @@ class Collection:
     def np_spectra(self, ndx=None, channel=None):
         """Return normal spectra, optionally selecting one group or channel."""
 
-        if (ndx is None) and (channel is None):        
+        if (ndx is None) and (channel is None):
             return np.array([[S[ch].data for ch in range(NPRODUCTS)] for S in self.spectra])
-        
+
         if (ndx is not None) and (channel is None):
             S = self.spectra[ndx]
             return np.array([S[ch].data for ch in range(NPRODUCTS)])
-        
+
         if (ndx is None) and (channel is not None):
             return np.array([S[channel].data for S in self.spectra])
 
         if (ndx is not None) and (channel is not None):
             S = self.spectra[ndx]
             return S[channel].data
-        
+
         assert(False), "Should not reach here"
 
     def np_tr_spectra(self, ndx=None, product: Optional[int]=None, *, channel: Optional[int]=None):
@@ -892,18 +892,18 @@ class Collection:
 
         if (ndx is None) and (product is None):
             return np.vstack([[S[prod].data for prod in range(NPRODUCTS)] for S in self.tr_spectra])
-        
+
         if (ndx is not None) and (product is None):
             S = self.tr_spectra[ndx]
             return np.array([S[prod].data for prod in range(NPRODUCTS)])
-        
+
         if (ndx is None) and (product is not None):
             return np.vstack([S[product].data for S in self.tr_spectra])
 
         if (ndx is not None) and (product is not None):
             S = self.tr_spectra[ndx]
             return S[product].data
-        
+
         assert(False), "Should not reach here"
 
     def canonical_report(self):

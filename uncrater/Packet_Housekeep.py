@@ -56,6 +56,7 @@ class Packet_Housekeep(PacketBase):
                     return
                 gains.append("LMH"[value])
 
+        # Common decoding handles every valid type; the branches below add derived fields for 0-2
         self.copy_attrs(attrs)
         self.time = 0
         self.hk_type = hk_type
@@ -78,7 +79,7 @@ class Packet_Housekeep(PacketBase):
                 self._issue("invalid_magic", "housekeeping heartbeat magic does not match BRNMRL")
             self.time = Time2Time(self.heartbeat.time_32, self.heartbeat.time_16)
             self._set_telemetry(self.heartbeat.TVS_sensors)
-        
+
         self._is_read = True
 
     def _set_adc_stats(self, stats):
