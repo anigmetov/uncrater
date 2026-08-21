@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - main
+      - ci/uncrater-production-decoder-v2
 
 permissions:
   contents: read
