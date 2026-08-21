@@ -85,14 +85,14 @@ class Collection:
         strict raises on the first fatal decode or assembly issue; otherwise
         fatal issues are recorded and invalid products are skipped.
         diagnostic_override permits an unknown reported version to use the
-        latest schema while recording that assumption. schema_variant names an
-        expected 0x306 layout and must agree with structural packet evidence.
+        latest schema while recording that assumption. schema_variant may be
+        'early' or 'final' and must agree with structural 0x306 evidence.
         """
         self.verbose = verbose
         self.dir = dir
         self.cut_to_hello = cut_to_hello
-        self.strict = bool(strict)
-        self.diagnostic_override = bool(diagnostic_override)
+        self.strict = strict
+        self.diagnostic_override = diagnostic_override
         self.schema_variant = schema_variant
         self.refresh()
 
@@ -196,11 +196,8 @@ class Collection:
     # Read only the fixed header bytes needed during schema planning
     @staticmethod
     def _read_prefix(record, size):
-        try:
-            with record.path.open("rb") as source:
-                return source.read(size)
-        except OSError:
-            return b""
+        with record.path.open("rb") as source:
+            return source.read(size)
 
     # Extract a fixed-position reported schema version when the packet has one
     def _reported_version(self, record):
@@ -301,10 +298,7 @@ class Collection:
                 details={"packets_seen": state.seen},
             )
             return
-        if not hasattr(packet, "ch"):
-            state.valid = False
-            return
-        channel = int(packet.ch)
+        channel = packet.ch
         if not 0 <= channel < 4:
             state.valid = False
             self._issue(
@@ -363,7 +357,7 @@ class Collection:
             self.waveform_metadata_packets.append(packet)
         else:
             state.valid = False
-        if state.valid and hasattr(packet, "timestamp"):
+        if state.valid:
             self.waveform_groups.append(
                 {
                     "packets": dict(sorted(state.packets.items())),
@@ -377,17 +371,17 @@ class Collection:
     @staticmethod
     def _multipart_page(packet, state):
         if isinstance(packet, Packet_Cal_Data):
-            return packet.appid - int(packet.schema.appids.AppID_Calibrator_Data)
+            return packet.appid - packet.schema.appids.AppID_Calibrator_Data
         if isinstance(packet, Packet_Cal_RawPFB):
-            return packet.appid - int(packet.schema.appids.AppID_Calibrator_RawPFB)
+            return packet.appid - packet.schema.appids.AppID_Calibrator_RawPFB
         if isinstance(packet, Packet_Cal_Debug):
-            return packet.appid - int(packet.schema.appids.AppID_Calibrator_Debug)
+            return packet.appid - packet.schema.appids.AppID_Calibrator_Debug
         raise TypeError(f"{state.family} received an incompatible packet")
 
     # Publish a complete valid calibrator group to structured and legacy outputs
     def _publish_multipart(self, state):
         pages = [state.pages[page] for page in range(state.page_count)]
-        if not state.valid or not all(self._packet_usable(packet) for packet in pages):
+        if not state.valid:
             state.clear()
             return
         if state.family == "calibrator_data":
@@ -399,7 +393,7 @@ class Collection:
                     "pages": tuple(pages),
                     "data": data,
                     "gNacc": pages[2].gNacc,
-                    "gphase": np.asarray(pages[2].gphase).copy(),
+                    "gphase": pages[2].gphase,
                     "schema_binding": pages[0].schema.binding_key,
                 }
             )
@@ -435,8 +429,8 @@ class Collection:
         page = self._multipart_page(packet, state)
         if page == 0:
             packet.read()
-            valid_start = self._packet_usable(packet) and hasattr(packet, "unique_packet_id")
-            packet_uid = int(packet.unique_packet_id) if valid_start else None
+            valid_start = self._packet_usable(packet)
+            packet_uid = packet.unique_packet_id if valid_start else None
             if state.active and valid_start and state.unique_packet_id == packet_uid:
                 state.valid = False
                 self._issue(
@@ -453,7 +447,7 @@ class Collection:
             state.unique_packet_id = packet_uid
             state.pages[0] = packet
         else:
-            if not state.active or state.unique_packet_id is None:
+            if not state.active:
                 packet.read()
                 if not packet.decode_status.has("orphan_multipart_page"):
                     self._issue(
@@ -484,25 +478,18 @@ class Collection:
     # Rebuild typed counters when older bindings expose raw error_regs bytes
     @staticmethod
     def _debug_error_register(packet):
-        metadata = getattr(packet, "metadata", None)
-        if metadata is None:
-            return None
-        if hasattr(metadata, "error_reg"):
+        metadata = packet.metadata
+        if packet.schema.binding_key in ("306-final", "307"):
             return metadata.error_reg
-        raw = getattr(metadata, "error_regs", None)
-        if raw is None:
+        if packet.schema.binding_key == "203":
             return None
-        for type_name in (
-            "calibrator_error_reg", "calibrator_errors",
-            "struct_calibrator_error_reg", "struct_calibrator_errors",
-        ):
-            error_type = getattr(packet.schema.pystruct, type_name, None)
-            if error_type is None or ctypes.sizeof(error_type) < ctypes.sizeof(raw):
-                continue
-            error = error_type()
-            ctypes.memmove(ctypes.addressof(error), bytes(raw), ctypes.sizeof(raw))
-            return error
-        return None
+        error = packet.schema.pystruct.calibrator_errors()
+        ctypes.memmove(
+            ctypes.addressof(error),
+            metadata.error_regs,
+            ctypes.sizeof(metadata.error_regs),
+        )
+        return error
 
     # Populate legacy arrays only from complete validated multipart groups
     def _finalize_compatibility_arrays(self):
@@ -531,7 +518,6 @@ class Collection:
             ) or (
                 isinstance(packet, Packet_Cal_Debug)
                 and packet in complete_starts
-                and hasattr(packet, "metadata")
             )
         ]
         if self.calib_debug:
@@ -577,7 +563,7 @@ class Collection:
         # we take drift packets for both debug and metadata but make sure we don't duplicate
         drift_packets = [
             packet for packet in self.cont
-            if hasattr(packet, "drift") and (
+            if (
                 isinstance(packet, Packet_Cal_Metadata)
                 or (
                     isinstance(packet, Packet_Cal_Debug)
@@ -591,7 +577,6 @@ class Collection:
             packet.data for packet in self.cont
             if isinstance(packet, Packet_Grimm)
             and self._packet_usable(packet)
-            and hasattr(packet, "data")
         ]
         self.grimm_spectra = np.vstack(grimm) if grimm else []
 
@@ -638,10 +623,9 @@ class Collection:
 
             packet = Packet(
                 record.original_appid,
-                blob_fn=str(record.path),
+                blob_fn=record.path,
                 schema=resolution.binding,
                 reported_version=resolution.reported_version,
-                schema_assumed=resolution.schema_assumed,
                 diagnostic_override=self.diagnostic_override,
                 strict=self.strict,
             )
@@ -658,15 +642,13 @@ class Collection:
                 if meta_packet is not None:
                     packet.set_meta(meta_packet)
                 packet.read()
-                if (self._packet_usable(packet) and meta_packet is not None
-                        and hasattr(packet, "product") and self.spectra):
+                if self._packet_usable(packet) and meta_packet is not None:
                     self.spectra[-1][packet.product] = packet
             elif isinstance(packet, Packet_TR_Spectrum):
                 if meta_packet is not None:
                     packet.set_meta(meta_packet)
                 packet.read()
-                if (self._packet_usable(packet) and meta_packet is not None
-                        and hasattr(packet, "product") and tr_spectra):
+                if self._packet_usable(packet) and meta_packet is not None:
                     tr_spectra[-1][packet.product] = packet
             elif isinstance(packet, Packet_Cal_Data):
                 self._consume_multipart(packet, record, data_state)

@@ -1,5 +1,4 @@
 import struct
-from collections.abc import Mapping
 from functools import lru_cache
 
 from .appids import normalize_dcb_appid
@@ -14,7 +13,7 @@ from .Packet_Housekeep import Packet_Housekeep
 from .Packet_Spectrum import Packet_Grimm, Packet_Metadata, Packet_Spectrum, Packet_TR_Spectrum
 from .Packet_Watchdog import Packet_Watchdog
 from .Packet_Waveform import Packet_Waveform, Packet_Waveform_Meta
-from .schema_registry import SchemaBinding, SchemaConflictError, SchemaEvidence, binding_for_key, evidence_from_packet, resolve_wire_version
+from .schema_registry import SchemaConflictError, SchemaEvidence, binding_for_key, evidence_from_packet, resolve_wire_version
 
 
 def add_range(packet_types, appid_module, constant_name, count, PacketType):
@@ -83,12 +82,8 @@ def bootstrap_schema(appid, blob, blob_fn, kwargs):
 
     payload = blob
     if payload is None:
-        try:
-            with open(blob_fn, "rb") as source:
-                payload = source.read()
-        except OSError:
-            return
-    payload = bytes(payload)
+        with open(blob_fn, "rb") as source:
+            payload = source.read()
 
     # Hello stores SW_version as uint32; metadata and HK use a uint16 prefix
     packet_version = None
@@ -113,7 +108,7 @@ def bootstrap_schema(appid, blob, blob_fn, kwargs):
         existing_evidence = kwargs.get("evidence")
         if existing_evidence is None:
             kwargs["evidence"] = packet_evidence
-        elif isinstance(existing_evidence, (SchemaEvidence, Mapping)):
+        elif isinstance(existing_evidence, SchemaEvidence):
             kwargs["evidence"] = (existing_evidence, packet_evidence)
         else:
             kwargs["evidence"] = (*existing_evidence, packet_evidence)
@@ -124,7 +119,7 @@ def dispatch_packet(appid, blob=None, blob_fn=None, **kwargs):
         raise ValueError
     original_appid = appid
     appid = normalize_dcb_appid(appid)
-    packet_kwargs = dict(kwargs)
+    packet_kwargs = kwargs
     bootstrap_schema(appid, blob, blob_fn, packet_kwargs)
 
     schema = packet_kwargs.get("schema")
@@ -137,9 +132,6 @@ def dispatch_packet(appid, blob=None, blob_fn=None, **kwargs):
         )
         schema = resolution.binding
         packet_kwargs["schema"] = schema
-        packet_kwargs.setdefault("schema_assumed", resolution.schema_assumed)
-    elif not isinstance(schema, SchemaBinding):
-        raise TypeError("schema must be a SchemaBinding")
 
     PacketType = packet_dict_for_binding(schema.binding_key).get(appid, PacketBase)
     packet_kwargs["original_appid"] = original_appid

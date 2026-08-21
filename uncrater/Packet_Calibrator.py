@@ -20,7 +20,7 @@ class Packet_Cal_Metadata(PacketBase):
             return
         drift_raw = np.array(temp.drift).astype(np.int64)
         if hasattr(temp, "drift_shift"):
-            drift_shift = int(temp.drift_shift)
+            drift_shift = temp.drift_shift
             if not 0 <= drift_shift <= 16:
                 self._fail(
                     "payload_decode_failed",
@@ -129,10 +129,7 @@ class Packet_Cal_Data(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        self.data_page = self.appid - int(self.schema.appids.AppID_Calibrator_Data)
-        if not 0 <= self.data_page < 3:
-            self._fail("unsupported_format", f"invalid calibrator data page {self.data_page}")
-            return
+        self.data_page = self.appid - self.schema.appids.AppID_Calibrator_Data
         if self.data_page > 0 and not hasattr(self, "expected_id"):
             self._fail("orphan_multipart_page", "calibrator continuation has no start page")
             return
@@ -178,10 +175,7 @@ class Packet_Cal_RawPFB(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        page = self.appid - int(self.schema.appids.AppID_Calibrator_RawPFB)
-        if not 0 <= page < 8:
-            self._fail("unsupported_format", f"invalid calibrator raw-PFB page {page}")
-            return
+        page = self.appid - self.schema.appids.AppID_Calibrator_RawPFB
         self.channel = page//2
         self.part = page%2
         if page > 0 and not hasattr(self, "expected_id"):
@@ -225,10 +219,7 @@ class Packet_Cal_Debug(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        self.debug_page = self.appid - int(self.schema.appids.AppID_Calibrator_Debug)
-        if not 0 <= self.debug_page < 8:
-            self._fail("unsupported_format", f"invalid calibrator debug page {self.debug_page}")
-            return
+        self.debug_page = self.appid - self.schema.appids.AppID_Calibrator_Debug
         if self.debug_page > 0 and not hasattr(self, "expected_id"):
             self._fail("orphan_multipart_page", "calibrator debug continuation has no start page")
             return
@@ -322,8 +313,8 @@ class Packet_Cal_Debug(PacketBase):
         for padding in padding_options:
             candidate = encoded if padding == 0 else encoded[:-padding]
             try:
-                decoded = bytes(rle_decode(candidate, original_size=expected))
-            except (IndexError, TypeError, ValueError):
+                decoded = rle_decode(candidate, original_size=expected)
+            except ValueError:
                 continue
             if len(decoded) == expected:
                 candidates.append(decoded)

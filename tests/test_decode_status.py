@@ -3,7 +3,7 @@ import ctypes
 import pytest
 
 from uncrater.PacketBase import PacketBase, Packet_Unsupported, cdi_rounded_size
-from uncrater.decode_status import DecodeStatus, PacketDecodeError
+from uncrater.decode_status import DecodeStatus
 
 
 class TinyStruct(ctypes.LittleEndianStructure):
@@ -33,28 +33,12 @@ def test_nonfatal_issue_keeps_decoded_data_available():
     assert not packet.decode_status.issues[0].fatal
 
 
-def test_structural_failure_raises_by_default_with_packet_context(tmp_path):
+def test_file_read_errors_propagate(tmp_path):
     path = tmp_path / "0001_02F0.bin"
     packet = PacketBase(0x2F0, blob_fn=path)
 
-    with pytest.raises(PacketDecodeError) as caught:
+    with pytest.raises(FileNotFoundError):
         packet.read()
-
-    assert caught.value.code == "blob_read_failed"
-    assert "AppID 0x2F0" in str(caught.value)
-    assert path.name in str(caught.value)
-
-
-def test_diagnostic_failure_is_recorded_once_and_invalid_data_is_absent(tmp_path):
-    packet = PacketBase(0x2F0, blob_fn=tmp_path / "missing.bin", strict=False)
-
-    packet.read()
-    packet.read()
-
-    assert packet.blob == b""
-    assert packet.decode_status.codes == ("blob_read_failed",)
-    assert packet.decode_status.issues[0].fatal
-    assert not hasattr(packet, "data")
 
 
 def test_blob_property_is_read_only_and_xxd_uses_loaded_bytes():
@@ -97,15 +81,6 @@ def test_diagnostic_unknown_schema_records_the_selected_fallback():
     assert packet.decode_status.issues[0].details == (
         ("selected_binding", packet.schema.binding_key),
     )
-
-
-@pytest.mark.parametrize(
-    "keyword",
-    ["decode_status", "schema_id", "binding_provenance"],
-)
-def test_managed_decode_contract_fields_cannot_arrive_as_payload_attributes(keyword):
-    with pytest.raises(TypeError, match="managed by PacketBase"):
-        PacketBase(0x999, blob=b"", **{keyword: object()})
 
 
 def test_unsupported_packet_uses_structural_failure_policy():

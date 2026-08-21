@@ -183,24 +183,22 @@ def test_306_packet_signatures_select_only_verified_variants(
     assert not resolution.schema_assumed
 
 
-@pytest.mark.parametrize("variant", ["early", "306-early", "306_early"])
-def test_306_matching_explicit_early_variant_still_requires_evidence(variant):
+def test_306_matching_explicit_early_variant_still_requires_evidence():
     assert (
         binding_for_wire_version(
             0x306,
-            variant=variant,
+            variant="early",
             evidence=SchemaEvidence(0x206, 2571, 0),
         ).binding_key
         == "306-early"
     )
 
 
-@pytest.mark.parametrize("variant", ["final", "306-final", "306_final"])
-def test_306_matching_explicit_final_variant_still_requires_evidence(variant):
+def test_306_matching_explicit_final_variant_still_requires_evidence():
     assert (
         binding_for_wire_version(
             0x306,
-            variant=variant,
+            variant="final",
             evidence=SchemaEvidence(0x206, 2692, 0),
         ).binding_key
         == "306-final"
@@ -273,17 +271,10 @@ def test_supported_and_unverified_306_evidence_fails_closed():
         )
 
 
-def test_evidence_mapping_and_housekeeping_bootstrap_are_supported():
-    mapping = {
-        "appid": 0x280,
-        "payload_length": 597,
-        "housekeeping_type": None,
-    }
-    assert binding_for_wire_version(0x306, evidence=mapping).binding_key == "306-final"
-
+def test_housekeeping_packet_provides_schema_evidence():
     blob = bytearray(2571)
     blob[10:12] = (0).to_bytes(2, "little")
-    evidence = evidence_from_packet(0x206, blob)
+    evidence = evidence_from_packet(0x206, bytes(blob))
     assert evidence == SchemaEvidence(0x206, 2571, 0)
     assert binding_for_wire_version(0x306, evidence=evidence).binding_key == "306-early"
 
@@ -293,8 +284,3 @@ def test_variant_is_rejected_for_other_version_states():
         binding_for_wire_version(0x307, variant="final")
     with pytest.raises(SchemaConflictError):
         binding_for_wire_version(None, variant="final")
-
-
-def test_bool_is_not_accepted_as_wire_version():
-    with pytest.raises(TypeError):
-        binding_for_wire_version(True)

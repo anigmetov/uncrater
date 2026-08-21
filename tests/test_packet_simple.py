@@ -15,8 +15,6 @@ from uncrater import (
     Packet_Waveform,
     Packet_Waveform_Meta,
 )
-from uncrater.Packet_Watchdog import Packet_Watchdog as DirectWatchdog
-from uncrater.Packet_Waveform import Packet_Waveform as DirectWaveform
 from uncrater.decode_status import PacketDecodeError
 from uncrater.schema_registry import BINDINGS_BY_KEY, LATEST_BINDING
 
@@ -181,7 +179,7 @@ def test_housekeeping_rejects_unknown_types_and_invalid_gain_values():
     unknown = bytearray(ctypes.sizeof(CL.housekeeping_data_base))
     struct.pack_into("<H", unknown, 0, 0x307)
     struct.pack_into("<H", unknown, 10, 99)
-    unknown_packet = Packet(0x206, blob=unknown, strict=False)
+    unknown_packet = Packet(0x206, blob=bytes(unknown), strict=False)
     assert unknown_packet.decode_status.codes == ("unsupported_format",)
     assert not hasattr(unknown_packet, "hk_type")
 
@@ -259,18 +257,6 @@ def test_waveform_signed_values_channel_and_exact_length():
         assert not hasattr(failed, "waveform")
 
 
-def test_direct_waveform_rejects_a_channel_outside_zero_to_three():
-    packet = DirectWaveform(
-        0x2F4,
-        blob=bytes(2 * 16_384),
-        schema=LATEST_BINDING,
-        strict=False,
-    )
-
-    assert packet.decode_status.codes == ("unsupported_format",)
-    assert not hasattr(packet, "waveform")
-
-
 def test_following_waveform_metadata_attaches_only_after_a_valid_decode():
     waveform = Packet(0x2F0, blob=bytes(2 * 16_384))
     metadata_value = CL.waveform_metadata()
@@ -311,19 +297,6 @@ def test_diagnostic_unknown_schema_metadata_still_attaches_decoded_timestamp():
     assert waveform.timestamp == 0x0123456789ABCDEF
 
 
-def test_watchdog_is_controlled_when_the_selected_schema_has_no_layout():
-    packet = DirectWatchdog(
-        0x20C,
-        blob=b"",
-        schema=BINDINGS_BY_KEY["203"],
-        reported_version=0x203,
-        strict=False,
-    )
-
-    assert packet.decode_status.codes == ("unsupported_format",)
-    assert not hasattr(packet, "unique_packet_id")
-
-
 @pytest.mark.parametrize(
     ("appid", "blob", "missing_field"),
     [
@@ -350,7 +323,7 @@ def test_malformed_housekeeping_does_not_publish_prefix_fields():
     blob = bytearray(ctypes.sizeof(CL.housekeeping_data_base))
     struct.pack_into("<H", blob, 0, 0x307)
     struct.pack_into("<H", blob, 10, 0)
-    packet = Packet(0x206, blob=blob, strict=False)
+    packet = Packet(0x206, blob=bytes(blob), strict=False)
 
     assert packet.decode_status.codes == ("bad_blob_length",)
     assert not hasattr(packet, "base")

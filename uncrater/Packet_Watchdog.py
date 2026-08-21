@@ -10,14 +10,7 @@ class Packet_Watchdog(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        struct_type = getattr(self.schema.pystruct, "watchdog_packet", None)
-        if struct_type is None:
-            self._fail(
-                "unsupported_format",
-                f"watchdog packets are unavailable in binding {self.schema.binding_key}",
-            )
-            return
-        temp = self._decode_struct(struct_type)
+        temp = self._decode_struct(self.schema.pystruct.watchdog_packet)
         if temp is None:
             return
         self.copy_attrs(temp)

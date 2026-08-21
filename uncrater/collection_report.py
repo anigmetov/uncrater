@@ -17,7 +17,6 @@ def canonical_report(collection):
                 for product in sorted(
                     key for key in group if isinstance(key, int)
                 )
-                if hasattr(group[product], "data")
             }
             for group in groups
         ]
@@ -25,12 +24,12 @@ def canonical_report(collection):
     def spectrum_associations(groups):
         return [
             {
-                "metadata_packet_index": int(group["meta"].packet_index),
-                "metadata_uid": int(group["meta"].unique_packet_id),
+                "metadata_packet_index": group["meta"].packet_index,
+                "metadata_uid": group["meta"].unique_packet_id,
                 "products": {
                     f"0x{product:02X}": {
-                        "packet_index": int(packet.packet_index),
-                        "uid": int(packet.unique_packet_id),
+                        "packet_index": packet.packet_index,
+                        "uid": packet.unique_packet_id,
                     }
                     for product, packet in sorted(
                         (key, value) for key, value in group.items()
@@ -44,9 +43,9 @@ def canonical_report(collection):
     def multipart_associations(groups):
         return [
             {
-                "unique_packet_id": int(group["unique_packet_id"]),
+                "unique_packet_id": group["unique_packet_id"],
                 "page_packet_indices": [
-                    int(packet.packet_index) for packet in group["pages"]
+                    packet.packet_index for packet in group["pages"]
                 ],
                 "schema_binding": group["schema_binding"],
             }
@@ -124,7 +123,6 @@ def canonical_report(collection):
             "grimm_packets": sum(
                 isinstance(packet, Packet_Grimm)
                 and collection._packet_usable(packet)
-                and hasattr(packet, "data")
                 for packet in collection.cont
             ),
         },
@@ -135,7 +133,6 @@ def canonical_report(collection):
                 {
                     str(channel): list(packet.waveform.shape)
                     for channel, packet in group["packets"].items()
-                    if hasattr(packet, "waveform")
                 }
                 for group in collection.waveform_groups
             ],
@@ -143,7 +140,6 @@ def canonical_report(collection):
                 {
                     name: list(getattr(packet, name).shape)
                     for name in ("AA", "BB", "ABR", "ABI")
-                    if hasattr(packet, name)
                 }
                 for packet in collection.zoom_spectra_packets
             ],
@@ -156,7 +152,7 @@ def canonical_report(collection):
                 for group in collection.calibrator_pfb_groups
             ],
             "calibrator_aggregates": {
-                name: list(np.asarray(getattr(collection, name)).shape)
+                name: list(getattr(collection, name).shape)
                 for name in aggregate_names
             },
             "grimm": (
@@ -169,9 +165,9 @@ def canonical_report(collection):
             "tr_spectra": spectrum_associations(collection.tr_spectra),
             "waveforms": [
                 {
-                    "metadata_packet_index": int(group["meta"].packet_index),
+                    "metadata_packet_index": group["meta"].packet_index,
                     "waveform_packet_indices": {
-                        str(channel): int(packet.packet_index)
+                        str(channel): packet.packet_index
                         for channel, packet in group["packets"].items()
                     },
                     "schema_binding": group["schema_binding"],

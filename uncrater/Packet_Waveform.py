@@ -15,13 +15,7 @@ class Packet_Waveform(PacketBase):
             return
         if not self._validate_length(2 * 16384, allow_cdi_padding=False):
             return
-        ch = self.appid - int(self.schema.appids.AppID_RawADC)
-        if not 0 <= ch < 4:
-            self._fail(
-                "unsupported_format",
-                f"waveform AppID implies invalid channel {ch}",
-            )
-            return
+        ch = self.appid - self.schema.appids.AppID_RawADC
         waveform = np.frombuffer(self._blob, dtype="<u2", count=16384).astype(np.int32)
         # Coreloop encodes negative samples as 16384 + value, including -8192 as code 8192
         waveform[waveform>=8192] -= 16384
@@ -49,7 +43,7 @@ class Packet_Waveform_Meta(PacketBase):
     def set_packets(self, packets):
         self.packets = packets
         self._read()
-        if any(issue.fatal for issue in self.decode_status.issues) or not hasattr(self, "timestamp"):
+        if any(issue.fatal for issue in self.decode_status.issues):
             return
         # Coreloop emits metadata after waveforms, so it annotates packets already decoded
         for i,p in enumerate(self.packets):
@@ -60,14 +54,7 @@ class Packet_Waveform_Meta(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        struct_type = getattr(self.schema.pystruct, "waveform_metadata", None)
-        if struct_type is None:
-            self._fail(
-                "unsupported_format",
-                f"waveform metadata is unavailable in binding {self.schema.binding_key}",
-            )
-            return
-        attrs = self._decode_struct(struct_type)
+        attrs = self._decode_struct(self.schema.pystruct.waveform_metadata)
         if attrs is None:
             return
         self.copy_attrs(attrs)

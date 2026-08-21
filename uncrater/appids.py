@@ -18,7 +18,6 @@ appid = id
 
 def normalize_dcb_appid(value: int) -> int:
     """Return the canonical RFS AppID for a DCB-reported AppID."""
-    value = int(value)
     # Only this RawADC value is rewritten by the DCB; adjacent IDs are not aliases
     if value == 0x4F0:
         return 0x2F0
@@ -189,7 +188,6 @@ def _format_appid(value: int) -> str:
 
 def appid_to_str(value: int) -> str:
     """Return a stable exact, family, reserved, or unknown AppID name."""
-    value = int(value)
     exact = _EXACT_NAMES.get(value)
     if exact is not None:
         return exact

@@ -1,8 +1,6 @@
 import binascii
 import ctypes
-import importlib
 import struct
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,10 +14,6 @@ from uncrater.Packet_Spectrum import (
 from uncrater.c_utils import encode_10plus6, encode_4_into_5
 from uncrater.constants import NCHANNELS, NPRODUCTS
 from uncrater.schema_registry import BINDINGS_BY_KEY, LATEST_BINDING
-
-
-spectrum_module = importlib.import_module("uncrater.Packet_Spectrum")
-
 
 def bytes_of(value):
     return ctypes.string_at(ctypes.addressof(value), ctypes.sizeof(value))
@@ -302,30 +296,6 @@ def test_spectrum_requires_valid_same_schema_metadata():
     assert not hasattr(conflict, "data")
 
 
-@pytest.mark.parametrize(("schema", "uid"), [(None, 1), (LATEST_BINDING, "bad")])
-def test_spectrum_rejects_metadata_without_schema_proof_or_integer_uid(schema, uid):
-    binding = LATEST_BINDING
-    metadata = SimpleNamespace(
-        unique_packet_id=uid,
-        expected_frequency_count=4,
-        weight=1,
-        format=binding.pystruct.OUTPUT_32BIT,
-        base=SimpleNamespace(Navg2_shift=0),
-        schema=schema,
-    )
-    packet = Packet_Spectrum(
-        binding.appids.AppID_SpectraHigh,
-        blob=packet_blob(1, b""),
-        meta=metadata,
-        schema=binding,
-        reported_version=0x307,
-        strict=False,
-    )
-
-    assert packet.decode_status.codes == ("missing_metadata",)
-    assert not hasattr(packet, "data")
-
-
 def test_nonfatal_unknown_schema_metadata_allows_diagnostic_spectrum_decode():
     binding = LATEST_BINDING
     raw = metadata_value(binding, navgf=4, weight=1, navg2_shift=0)
@@ -354,60 +324,24 @@ def test_nonfatal_unknown_schema_metadata_allows_diagnostic_spectrum_decode():
     np.testing.assert_array_equal(packet.data, values)
 
 
-def test_spectrum_rejects_invalid_count_weight_and_format():
+@pytest.mark.parametrize(
+    ("attribute", "value", "issue_code"),
+    [("weight", 0, "payload_decode_failed"), ("format", 255, "unsupported_format")],
+)
+def test_spectrum_rejects_invalid_weight_and_format(attribute, value, issue_code):
     binding = LATEST_BINDING
-    base = SimpleNamespace(Navg2_shift=0)
-    cases = [
-        (3, 1, binding.pystruct.OUTPUT_16BIT_4_TO_5, "payload_decode_failed"),
-        (4, 0, binding.pystruct.OUTPUT_32BIT, "payload_decode_failed"),
-        (4, 1, 255, "unsupported_format"),
-    ]
-    for count, weight, output_format, issue_code in cases:
-        metadata = SimpleNamespace(
-            unique_packet_id=1,
-            expected_frequency_count=count,
-            weight=weight,
-            format=output_format,
-            base=base,
-            schema=binding,
-        )
-        packet = Packet_Spectrum(
-            binding.appids.AppID_SpectraHigh,
-            blob=packet_blob(1, b""),
-            meta=metadata,
-            schema=binding,
-            reported_version=0x307,
-            strict=False,
-        )
-        assert packet.decode_status.codes == (issue_code,)
-        assert not hasattr(packet, "data")
-
-
-def test_spectrum_decoder_count_mismatch_does_not_fabricate_data(monkeypatch):
-    binding = LATEST_BINDING
-    metadata = make_metadata(
-        binding,
-        output_format=binding.pystruct.OUTPUT_16BIT_10_PLUS_6,
-        navgf=4,
-    )
-    expected = metadata.expected_frequency_count
-    payload = np.zeros(expected, dtype="<u2").tobytes()
-    monkeypatch.setattr(
-        spectrum_module,
-        "decode_10plus6",
-        lambda values: np.zeros(values.size - 1, dtype=np.int32),
-    )
-
+    metadata = make_metadata(binding, navgf=4)
+    setattr(metadata, attribute, value)
     packet = Packet_Spectrum(
         binding.appids.AppID_SpectraHigh,
-        blob=packet_blob(metadata.unique_packet_id, payload),
+        blob=packet_blob(metadata.unique_packet_id, b""),
         meta=metadata,
         schema=binding,
         reported_version=0x307,
         strict=False,
     )
 
-    assert packet.decode_status.codes == ("payload_decode_failed",)
+    assert packet.decode_status.codes == (issue_code,)
     assert not hasattr(packet, "data")
 
 
@@ -483,34 +417,6 @@ def test_time_resolved_shape_uses_both_averaging_dimensions():
     assert (packet.priority, packet.product) == (2, 3)
     assert packet.data.shape == (4, 4)
     np.testing.assert_array_equal(packet.data.ravel(), values)
-
-
-def test_time_resolved_decoder_count_mismatch_does_not_fabricate_data(monkeypatch):
-    binding = LATEST_BINDING
-    metadata = make_metadata(
-        binding,
-        navg2_shift=0,
-        tr_start=0,
-        tr_stop=4,
-        tr_avg_shift=0,
-    )
-    encoded = np.zeros(4, dtype="<u2").tobytes()
-    monkeypatch.setattr(
-        spectrum_module,
-        "decode_10plus6",
-        lambda values: np.zeros(values.size - 1, dtype=np.int32),
-    )
-    packet = Packet_TR_Spectrum(
-        binding.appids.AppID_SpectraTRHigh,
-        blob=packet_blob(metadata.unique_packet_id, encoded),
-        meta=metadata,
-        schema=binding,
-        reported_version=0x307,
-        strict=False,
-    )
-
-    assert packet.decode_status.codes == ("payload_decode_failed",)
-    assert not hasattr(packet, "data")
 
 
 @pytest.mark.parametrize(

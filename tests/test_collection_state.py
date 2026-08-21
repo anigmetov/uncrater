@@ -22,7 +22,10 @@ class FakePacket:
         self.schema = schema
         self.schema_id = schema.canonical_schema_id
         self.reported_version = kwargs.get("reported_version")
-        self.schema_assumed = kwargs.get("schema_assumed", False)
+        self.schema_assumed = (
+            self.reported_version is None
+            or self.reported_version not in schema.accepted_reported_versions
+        )
         self.strict = strict
         self.decode_status = DecodeStatus()
         self.is_read = False
@@ -261,15 +264,6 @@ def install_fake_packets(monkeypatch, call_log=None):
         monkeypatch.setattr(collection_module, name, packet_type)
 
     def factory(appid, blob_fn, schema, **kwargs):
-        if call_log is not None:
-            call_log.append(
-                {
-                    "appid": appid,
-                    "binding": schema.binding_key,
-                    "reported_version": kwargs.get("reported_version"),
-                    "schema_assumed": kwargs.get("schema_assumed"),
-                }
-            )
         if appid == 0x20F:
             packet_type = FakeMetadata
         elif appid == 0x209:
@@ -299,7 +293,16 @@ def install_fake_packets(monkeypatch, call_log=None):
         else:
             packet_type = FakePacket
         packet = packet_type(appid, blob_fn, schema, **kwargs)
-        if kwargs.get("schema_assumed") and kwargs.get("reported_version") is not None:
+        if call_log is not None:
+            call_log.append(
+                {
+                    "appid": appid,
+                    "binding": schema.binding_key,
+                    "reported_version": packet.reported_version,
+                    "schema_assumed": packet.schema_assumed,
+                }
+            )
+        if packet.schema_assumed and packet.reported_version is not None:
             packet.decode_status.add(
                 "unknown_schema",
                 "synthetic diagnostic schema override",

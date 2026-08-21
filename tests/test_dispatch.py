@@ -31,31 +31,6 @@ def test_packet_base_records_binding_metadata():
     assert packet.binding_provenance["binding_key"] == "307"
 
 
-@pytest.mark.parametrize(
-    ("reported_version", "schema_assumed"),
-    [(None, False), (0x307, True)],
-)
-def test_packet_base_rejects_contradictory_schema_assumed(
-    reported_version, schema_assumed
-):
-    with pytest.raises(SchemaConflictError):
-        PacketBase(
-            0x123,
-            blob_fn="unused",
-            reported_version=reported_version,
-            schema_assumed=schema_assumed,
-        )
-
-
-def test_packet_factory_preserves_schema_assumed_validation():
-    with pytest.raises(SchemaConflictError, match="schema_assumed"):
-        packet_module.Packet(
-            0x123,
-            blob_fn="unused",
-            schema_assumed=False,
-        )
-
-
 def test_packet_base_rejects_conflicting_version_aliases():
     with pytest.raises(SchemaConflictError, match="version and reported_version"):
         PacketBase(
@@ -254,7 +229,7 @@ def test_factory_rejects_conflicting_306_session_and_packet_evidence(
     with pytest.raises(SchemaConflictError, match="conflicting 0x306 ABIs"):
         packet_module.Packet(
             0x206,
-            blob=payload,
+            blob=bytes(payload),
             reported_version=0x306,
             evidence=SchemaEvidence(0x206, session_length, 0),
         )

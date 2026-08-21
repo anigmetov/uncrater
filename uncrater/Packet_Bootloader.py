@@ -12,15 +12,9 @@ class Packet_Bootloader(PacketBase):
     def _read(self):
         if self._is_read:
             return
-        if not self._load_blob():
-            return
         if not self._validate_min_length(32):
             return
-        try:
-            self.header = struct.unpack_from("<8I", self._blob, 0)
-        except struct.error as e:
-            self._fail("payload_decode_failed", str(e))
-            return
+        self.header = struct.unpack_from("<8I", self._blob, 0)
         msg_type = ["BL_STARTUP", "BL_JumpTo_FLT_SW", "BL_PRGM_CHKSUM", "BL_PRGM_VERIFY", "BL_ERROR"]
         self.msg_type = self.header[0]
         if (self.msg_type<5):
@@ -38,11 +32,7 @@ class Packet_Bootloader(PacketBase):
         expected_size = 32 + self.payload_len*4
         if not self._validate_length(expected_size, allow_cdi_padding=False):
             return
-        try:
-            payload = struct.unpack_from(f"<{self.payload_len}I", self._blob, 32)
-        except struct.error as e:
-            self._fail("payload_decode_failed", str(e))
-            return
+        payload = struct.unpack_from(f"<{self.payload_len}I", self._blob, 32)
         self.payload = np.array(payload, dtype=np.uint32)
         self._is_read = True
 

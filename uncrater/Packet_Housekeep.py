@@ -20,10 +20,10 @@ class Packet_Housekeep(PacketBase):
         if temp is None:
             return
 
-        hk_type = int(temp.housekeeping_type)
-        version = int(temp.version)
-        unique_packet_id = int(temp.unique_packet_id)
-        errors = int(temp.errors)
+        hk_type = temp.housekeeping_type
+        version = temp.version
+        unique_packet_id = temp.unique_packet_id
+        errors = temp.errors
         if not self._check_declared_version(version):
             return
 

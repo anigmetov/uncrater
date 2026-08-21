@@ -218,7 +218,7 @@ def _binding(
     signatures: tuple[PacketSignature, ...] = (),
 ) -> SchemaBinding:
     record = PROVENANCE["bindings"][key]
-    canonical_schema_id = int(record["canonical_schema_id"])
+    canonical_schema_id = record["canonical_schema_id"]
     if module.pystruct.VERSION_ID != canonical_schema_id:
         raise RuntimeError(
             f"Frozen binding {key} reports VERSION_ID "
@@ -229,7 +229,7 @@ def _binding(
         binding_key=key,
         canonical_schema_id=canonical_schema_id,
         accepted_reported_versions=tuple(record["accepted_reported_versions"]),
-        variant=record.get("variant"),
+        variant=record["variant"],
         pystruct=module.pystruct,
         appids=module.appId,
         commands=module.command,
@@ -297,17 +297,12 @@ _KNOWN_REPORTED_VERSION_IDS = frozenset(
 def binding_for_key(binding_key: str) -> SchemaBinding:
     """Return a frozen binding by its unique provenance key."""
 
-    try:
-        return BINDINGS_BY_KEY[binding_key]
-    except KeyError as exc:
-        raise SchemaResolutionError(
-            f"Unknown schema binding {binding_key!r}"
-        ) from exc
+    return BINDINGS_BY_KEY[binding_key]
 
 
 def evidence_from_packet(
     appid: int,
-    blob: bytes | bytearray | memoryview,
+    blob: bytes,
 ) -> SchemaEvidence:
     """Extract schema evidence available before selecting a binding."""
 
@@ -320,39 +315,20 @@ def evidence_from_packet(
 
 def _normalize_evidence(
     evidence: SchemaEvidence
-    | Mapping[str, int | None]
-    | Iterable[SchemaEvidence | Mapping[str, int | None]]
+    | Iterable[SchemaEvidence]
     | None,
 ) -> tuple[SchemaEvidence, ...]:
     if evidence is None:
         return ()
     if isinstance(evidence, SchemaEvidence):
         return (evidence,)
-    if isinstance(evidence, Mapping):
-        return (
-            SchemaEvidence(
-                appid=int(evidence["appid"]),
-                payload_length=int(evidence["payload_length"]),
-                housekeeping_type=(
-                    None
-                    if evidence.get("housekeeping_type") is None
-                    else int(evidence["housekeeping_type"])
-                ),
-            ),
-        )
-    return tuple(
-        item
-        if isinstance(item, SchemaEvidence)
-        else _normalize_evidence(item)[0]
-        for item in evidence
-    )
+    return tuple(evidence)
 
 
 def _variant_binding(variant: str) -> SchemaBinding:
-    normalized = variant.lower().replace("_", "-")
-    if normalized in ("early", "306-early"):
+    if variant == "early":
         return BINDINGS_BY_KEY["306-early"]
-    if normalized in ("final", "306-final"):
+    if variant == "final":
         return BINDINGS_BY_KEY["306-final"]
     raise SchemaResolutionError(f"Unknown 0x306 schema variant {variant!r}")
 
@@ -413,18 +389,11 @@ def resolve_wire_version(
     *,
     variant: str | None = None,
     evidence: SchemaEvidence
-    | Mapping[str, int | None]
-    | Iterable[SchemaEvidence | Mapping[str, int | None]]
+    | Iterable[SchemaEvidence]
     | None = None,
     diagnostic_override: bool = False,
 ) -> SchemaResolution:
     """Resolve a reported version and retain how the selection was made."""
-
-    if reported_version is not None and (
-        isinstance(reported_version, bool)
-        or not isinstance(reported_version, int)
-    ):
-        raise TypeError("reported_version must be an integer or None")
 
     if reported_version is None:
         if variant is not None:
@@ -465,8 +434,7 @@ def binding_for_wire_version(
     *,
     variant: str | None = None,
     evidence: SchemaEvidence
-    | Mapping[str, int | None]
-    | Iterable[SchemaEvidence | Mapping[str, int | None]]
+    | Iterable[SchemaEvidence]
     | None = None,
     diagnostic_override: bool = False,
 ) -> SchemaBinding:
