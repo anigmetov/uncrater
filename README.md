@@ -60,9 +60,10 @@ binding = binding_for_wire_version(
 ```
 
 If a collection has no usable version evidence, decoding uses the latest binding
-and records that the schema was assumed. Structural errors raise
-`PacketDecodeError` by default; `strict=False` records machine-readable issues
-in `decode_status` without fabricating valid-looking data.
+and records that the schema was assumed. `Collection` is non-strict by default:
+it warns on stderr, records machine-readable issues in `decode_status`, and skips
+invalid products without discarding the rest of the session. Pass `strict=True`
+to raise `PacketDecodeError` on the first fatal issue.
 
 `Collection` orders packet files deterministically and uses the first Hello to
 select one schema for the entire directory. When there is no Hello, it falls

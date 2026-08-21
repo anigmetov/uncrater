@@ -77,13 +77,13 @@ class _WaveformState:
 class Collection:
 
     def __init__(self, dir, verbose = False, cut_to_hello = False, *,
-                 strict=True, diagnostic_override=False, schema_variant=None):
+                 strict=False, diagnostic_override=False, schema_variant=None):
         """Decode and assemble the packet files in a CDI directory.
 
         dir names the directory; verbose prints packet-level progress, and
         cut_to_hello discards everything before the last Hello packet.
-        strict raises on the first fatal decode or assembly issue; otherwise
-        fatal issues are recorded and invalid products are skipped.
+        strict=False records fatal issues and skips invalid products; strict=True
+        raises on the first fatal decode or assembly issue.
         diagnostic_override permits an unknown reported version to use the
         latest schema while recording that assumption. schema_variant may be
         'early' or 'final' and must agree with structural 0x306 evidence.
@@ -564,7 +564,10 @@ class Collection:
         drift_packets = [
             packet for packet in self.cont
             if (
-                isinstance(packet, Packet_Cal_Metadata)
+                (
+                    isinstance(packet, Packet_Cal_Metadata)
+                    and self._packet_usable(packet)
+                )
                 or (
                     isinstance(packet, Packet_Cal_Debug)
                     and packet in complete_starts
@@ -675,6 +678,7 @@ class Collection:
                 self.watchdog_packets.append(packet)
             if isinstance(packet, Packet_Housekeep) and self._packet_usable(packet):
                 self.housekeeping_packets.append(packet)
+            self._warn_packet(packet, record)
             self._append_packet(packet, record, i)
             if isinstance(packet, Packet_EOS):
                 self._flush_boundaries(
@@ -925,6 +929,8 @@ class Collection:
             fatal=fatal,
             details=details,
         )
+        context = "" if issue.source is None else f" ({issue.source})"
+        print(f"Warning: {issue.code}{context}: {issue.message}", file=sys.stderr)
         if fatal and self.strict:
             raise PacketDecodeError(issue, self.decode_status)
 
@@ -934,6 +940,21 @@ class Collection:
         # Diagnostic findings keep decoded fields available; only fatal issues
         # make a packet unsafe to assemble into a collection product.
         return not any(issue.fatal for issue in packet.decode_status.issues)
+
+    # Print one concise warning for every packet carrying decode issues
+    @staticmethod
+    def _warn_packet(packet, record):
+        if packet.decode_status.ok:
+            return
+        problems = "; ".join(
+            f"{issue.code}: {issue.message}"
+            for issue in packet.decode_status.issues
+        )
+        print(
+            f"Warning: packet {record.basename} "
+            f"(AppID 0x{record.original_appid:03X}): {problems}",
+            file=sys.stderr,
+        )
 
     # Reject a waveform group left incomplete at a session boundary
     def _flush_waveforms(self, state, *, boundary, record):

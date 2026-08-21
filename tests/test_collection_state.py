@@ -84,6 +84,13 @@ class FakeSpectrum(FakePacket):
         self.product = self.appid & 0xF
         self.unique_packet_id = self.meta.unique_packet_id
         self.data = np.asarray([self.product], dtype=float)
+        if "crc-mismatch" in self.blob_fn.name:
+            self.decode_status.add(
+                "crc_mismatch",
+                "synthetic CRC mismatch",
+                appid=self.appid,
+                source=self.blob_fn.name,
+            )
 
 
 class FakeTRSpectrum(FakePacket):
@@ -244,6 +251,15 @@ class FakeWatchdog(FakePacket):
     pass
 
 
+class FakeCalMetadata(FakePacket):
+    def read(self):
+        super().read()
+        if "malformed" in self.blob_fn.name:
+            self.fail("bad_blob_length", "malformed calibrator metadata")
+            return
+        self.drift = np.asarray([1], dtype=float)
+
+
 def install_fake_packets(monkeypatch, call_log=None):
     replacements = {
         "Packet_Metadata": FakeMetadata,
@@ -259,6 +275,7 @@ def install_fake_packets(monkeypatch, call_log=None):
         "Packet_Heartbeat": FakeHeartbeat,
         "Packet_Housekeep": FakeHousekeeping,
         "Packet_Watchdog": FakeWatchdog,
+        "Packet_Cal_Metadata": FakeCalMetadata,
     }
     for name, packet_type in replacements.items():
         monkeypatch.setattr(collection_module, name, packet_type)
@@ -288,6 +305,8 @@ def install_fake_packets(monkeypatch, call_log=None):
             packet_type = FakeHeartbeat
         elif appid == 0x206:
             packet_type = FakeHousekeeping
+        elif appid == 0x280:
+            packet_type = FakeCalMetadata
         elif appid in (0x20C, 0x2FF):
             packet_type = FakeWatchdog
         else:
@@ -361,6 +380,55 @@ def test_malformed_waveform_invalidates_its_group(monkeypatch, tmp_path):
 
     assert collection.invalid_counts_by_issue == {"bad_blob_length": 1}
     assert collection.waveform_groups == []
+
+
+def test_default_nonstrict_warns_and_skips_bad_calibrator_metadata(
+    monkeypatch, tmp_path, capsys
+):
+    install_fake_packets(monkeypatch)
+    path = write_packet(
+        tmp_path,
+        0,
+        0x280,
+        struct.pack("<H", 0x307),
+        label="malformed",
+    )
+
+    collection = Collection(tmp_path)
+
+    warning = capsys.readouterr().err
+    assert warning.count("Warning: packet") == 1
+    assert path.name in warning
+    assert "bad_blob_length" in warning
+    assert collection.invalid_counts_by_issue == {"bad_blob_length": 1}
+    assert len(collection.cont) == 1
+    assert collection.calib_meta == []
+    assert collection.cd_drift.size == 0
+
+
+def test_collection_warns_but_keeps_crc_mismatched_spectrum(
+    monkeypatch, tmp_path, capsys
+):
+    install_fake_packets(monkeypatch)
+    write_packet(tmp_path, 0, 0x20F, struct.pack("<H", 0x307))
+    path = write_packet(tmp_path, 1, 0x210, label="crc-mismatch")
+
+    collection = Collection(tmp_path)
+
+    warning = capsys.readouterr().err
+    assert warning.count("Warning: packet") == 1
+    assert path.name in warning
+    assert "crc_mismatch" in warning
+    assert collection.invalid_counts_by_issue == {"crc_mismatch": 1}
+    assert 0 in collection.spectra[0]
+
+
+def test_strict_collection_still_raises_for_bad_packet(monkeypatch, tmp_path):
+    install_fake_packets(monkeypatch)
+    write_packet(tmp_path, 0, 0x2F0, label="malformed")
+
+    with pytest.raises(PacketDecodeError, match="bad_blob_length"):
+        Collection(tmp_path, strict=True)
 
 
 def test_metadata_after_invalid_only_waveforms_is_reported(monkeypatch, tmp_path):
