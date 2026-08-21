@@ -4,7 +4,9 @@
 
 # uncrater
 
-LuSEE-Night binary telemetry packet decoder.
+Uncrater is a decoder and diagnostic toolkit for coreloop CDI output,
+an intermediate one-logical-packet-per-file format used for testing
+and as input to luseepy’s analysis pipeline.
 
 ## Installation
 
