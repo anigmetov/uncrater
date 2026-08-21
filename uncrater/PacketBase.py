@@ -1,6 +1,9 @@
 import os, sys
+import ctypes
+
 import hexdump
 from .coreloop import pycoreloop,pycoreloop_203,pycoreloop_305,pycoreloop_307
+from .decode_status import DecodeStatus, PacketDecodeError, source_label
 from .schema_registry import SchemaBinding, SchemaConflictError, resolve_wire_version
 pystruct = pycoreloop.pystruct
 pystruct_203 = pycoreloop_203.pystruct
@@ -8,17 +11,26 @@ pystruct_305 = pycoreloop_305.pystruct
 pystruct_307 = pycoreloop_307.pystruct
 
 
+def cdi_rounded_size(size):
+    """Include the four-byte CDI padding omitted from ctypes struct sizes."""
+    return (size + 3) & ~3
+
+
 class PacketBase:
     def __init__ (self, appid, blob = None, blob_fn = None, version=None,
                   schema=None, reported_version=None, schema_variant=None,
                   schema_assumed=None, evidence=None, diagnostic_override=False,
-                  original_appid=None, **kwargs):
+                  strict=True, original_appid=None, **kwargs):
         if (blob is None) and (blob_fn is None):
             raise ValueError
         self.appid = appid
         self.original_appid = appid if original_appid is None else original_appid
-        self._blob = blob
+        self._blob = None if blob is None else bytes(blob)
         self._blob_fn = blob_fn
+        self._blob_load_attempted = blob is not None
+        self.strict = bool(strict)
+        self.decode_status = DecodeStatus()
+        self._diagnostic_override = bool(diagnostic_override)
 
         if (reported_version is not None and version is not None
                 and reported_version != version):
@@ -83,21 +95,152 @@ class PacketBase:
         self.binding_provenance = schema.binding_provenance
         self._version = reported_version
         self._is_read = False
+        if self.schema_assumed and reported_version is not None:
+            self._issue(
+                "unknown_schema",
+                f"reported schema 0x{reported_version:X} decoded with "
+                f"diagnostic binding {schema.binding_key}",
+                details={"selected_binding": schema.binding_key},
+            )
+        managed = {"decode_status", "schema_id", "binding_provenance", "strict"}
         for key, value in kwargs.items():
+            if key in managed:
+                raise TypeError(f"{key!r} is managed by PacketBase")
             setattr(self, key, value)
         if blob is not None:
             self._read()
         
 
         
+    @property
+    def blob(self):
+        if not self._load_blob():
+            return b""
+        return self._blob
+
+    def _context(self):
+        return {
+            "appid": self.appid,
+            "source": source_label(self._blob_fn),
+        }
+
+    def _issue(self, code, message, *, fatal=False, details=None):
+        # Parsers call this for findings that should stay attached to the packet;
+        # unlike _fail, recording an issue never stops decoding by itself.
+        return self.decode_status.add(
+            code,
+            message,
+            fatal=fatal,
+            details=details,
+            **self._context(),
+        )
+
+    def _fail(self, code, message, *, details=None):
+        # Structural validators call this when publishing decoded fields is unsafe.
+        # Strict mode raises; diagnostic mode records the failure and returns.
+        issue = self._issue(code, message, fatal=True, details=details)
+        self._is_read = True
+        if self.strict:
+            raise PacketDecodeError(issue, self.decode_status)
+
+    def _load_blob(self):
+        if self._blob is not None:
+            return True
+        if self._blob_load_attempted:
+            return False
+        self._blob_load_attempted = True
+        try:
+            with open(self._blob_fn, "rb") as source:
+                self._blob = source.read()
+        except OSError as exc:
+            self._fail("blob_read_failed", str(exc))
+            return False
+        return True
+
     def _read(self):
         if self._is_read:
             return
-        if self._blob is None:
-            self._blob = open(self._blob_fn,"rb").read()    
+        if not self._load_blob():
+            return
+        self._is_read = True
 
     def read(self):
         self._read()
+
+    def _accepted_lengths(self, raw_size, *, allow_cdi_padding=True,
+                          extra_lengths=()):
+        accepted = {raw_size, *extra_lengths}
+        if allow_cdi_padding:
+            accepted.add(cdi_rounded_size(raw_size))
+        return tuple(sorted(accepted))
+
+    def _validate_length(self, raw_size, *, allow_cdi_padding=True,
+                         extra_lengths=()):
+        if not self._load_blob():
+            return False
+        accepted = self._accepted_lengths(
+            raw_size,
+            allow_cdi_padding=allow_cdi_padding,
+            extra_lengths=extra_lengths,
+        )
+        if len(self._blob) in accepted:
+            return True
+        self._fail(
+            "bad_blob_length",
+            f"expected payload length in {accepted}, got {len(self._blob)}",
+            details={"actual": len(self._blob), "expected": list(accepted)},
+        )
+        return False
+
+    def _validate_min_length(self, minimum):
+        if not self._load_blob():
+            return False
+        if len(self._blob) >= minimum:
+            return True
+        self._fail(
+            "bad_blob_length",
+            f"expected at least {minimum} bytes, got {len(self._blob)}",
+            details={"actual": len(self._blob), "minimum": minimum},
+        )
+        return False
+
+    def _decode_prefix_struct(self, struct_type):
+        raw_size = ctypes.sizeof(struct_type)
+        if not self._validate_min_length(raw_size):
+            return None
+        try:
+            return struct_type.from_buffer_copy(self._blob[:raw_size])
+        except (TypeError, ValueError) as exc:
+            self._fail("payload_decode_failed", str(exc))
+            return None
+
+    def _decode_struct(self, struct_type):
+        raw_size = ctypes.sizeof(struct_type)
+        if not self._validate_length(raw_size):
+            return None
+        try:
+            return struct_type.from_buffer_copy(self._blob[:raw_size])
+        except (TypeError, ValueError) as exc:
+            self._fail("payload_decode_failed", str(exc))
+            return None
+
+    def _check_declared_version(self, declared_version):
+        declared_version = int(declared_version)
+        if declared_version in self.schema.accepted_reported_versions:
+            return True
+        if (self._diagnostic_override and self.schema_assumed
+                and declared_version == self.reported_version):
+            return True
+        self._fail(
+            "declared_version_mismatch",
+            f"payload declares 0x{declared_version:X}, selected binding is "
+            f"{self.schema.binding_key}",
+            details={
+                "declared_version": declared_version,
+                "selected_binding": self.schema.binding_key,
+            },
+        )
+        return False
 
     def _analyze_attr(self, attr_name: str, obj: object, full_attr_name: str) -> None:
         attr = getattr(obj, attr_name)
