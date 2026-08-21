@@ -1,5 +1,11 @@
 import os, sys
 import glob
+import ctypes
+import re
+import struct
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
 import numpy as np
 from typing import Optional
 
@@ -10,217 +16,666 @@ from .Packet import *
 
 from .error_utils import *
 from .constants import NPRODUCTS, NCHANNELS
+from .decode_status import DecodeStatus, PacketDecodeError
+from .schema_registry import LATEST_BINDING, SchemaEvidence, SchemaResolution, SchemaResolutionError, resolve_wire_version
+
+
+PACKET_FILENAME_RE = re.compile(
+    r"^(?P<packet_index>[0-9]+)(?:_[^/]*)?_(?P<appid>[0-9A-Fa-f]+)\.bin$"
+)
+
+
+@dataclass(frozen=True)
+class _PacketRecord:
+    path: Path
+    basename: str
+    packet_index: int
+    original_appid: int
+    appid: int
+    mtime: float
+
+
+@dataclass(frozen=True)
+class _PlannedPacket:
+    record: _PacketRecord
+    resolution: SchemaResolution
+
+
+@dataclass
+class _MultipartState:
+    family: str
+    page_count: int
+    pages: dict[int, PacketBase] = field(default_factory=dict)
+    unique_packet_id: Optional[int] = None
+    binding_key: Optional[str] = None
+    valid: bool = True
+
+    @property
+    def active(self):
+        return bool(self.pages)
+
+    def clear(self):
+        self.pages.clear()
+        self.unique_packet_id = None
+        self.binding_key = None
+        self.valid = True
+
+
+@dataclass
+class _WaveformState:
+    packets: dict[int, Packet_Waveform] = field(default_factory=dict)
+    seen: int = 0
+    binding_key: Optional[str] = None
+    valid: bool = True
+
+    @property
+    def active(self):
+        return self.seen > 0
+
+    def clear(self):
+        self.packets.clear()
+        self.seen = 0
+        self.binding_key = None
+        self.valid = True
 
 
 class Collection:
 
-    def __init__(self, dir, verbose = False, cut_to_hello = False):
+    def __init__(self, dir, verbose = False, cut_to_hello = False, *,
+                 strict=True, diagnostic_override=False, schema_variant=None):
         self.verbose = verbose
         self.dir = dir
         self.cut_to_hello = cut_to_hello
+        self.strict = bool(strict)
+        self.diagnostic_override = bool(diagnostic_override)
+        self.schema_variant = schema_variant
         self.refresh()
 
-    def refresh(self, quiet=False):
+    def _reset_outputs(self):
         self.cont = []
         self.time = []
         self.desc = []
         self.spectra = []
-        tr_spectra = []
         self.calib = []
         self.heartbeat_packets = []
         self.watchdog_packets = []
         self.housekeeping_packets = []
         self.waveform_packets = []
+        self.waveform_metadata_packets = []
+        self.waveform_groups = []
         self.zoom_spectra_packets = []
-        flist = glob.glob(os.path.join(self.dir, "*.bin"))
-        if not quiet:
-            print(f"Analyzing {len(flist)} files from {self.dir}.")
-        flist = sorted(flist, key=lambda x: int(x[x.rfind("/") + 1 :].split("_")[0]))
-        meta_packet = None
-
         self.calib_meta = []
-        self.calib_data = []
-        self.calib_gNacc = []
-        self.calib_gphase = []
-        self.calib_pfb = []
         self.calib_debug = []
-        waveforms = [None,None,None,None]
-        def fn2appid(fn):
-            return int(fn.replace(".bin", "").split("_")[-1], 16)
-        if self.cut_to_hello:
-            appids = [fn2appid(fn) for fn in flist]
-            for i in range(len(appids)-1,0,-1):
-                if appid_is_hello(appids[i]):
-                    flist = flist[i:]
-                    break
-        version=None
-        for i, fn in enumerate(flist):
-            if self.verbose:
-                print ("Reading ",fn)
-            appid = fn2appid(fn)
-            
-            if appid_is_hello(appid):
-                hello = Packet(appid, blob_fn=fn)
-                hello._read()
-                version = hello.SW_version
-                if self.verbose:
-                    print (f"Detected FW version: {version:X}")
+        self.calibrator_data_groups = []
+        self.calibrator_pfb_groups = []
+        self.calibrator_debug_groups = []
+        self.calib_data = np.array([])
+        self.calib_gNacc = np.array([])
+        self.calib_gphase = np.array([])
+        self.calib_pfb = np.array([])
+        self.pfb = np.array([])
+        self.grimm_spectra = []
+        self.decode_status = DecodeStatus()
+        self.packet_counts_by_appid = Counter()
+        self.invalid_counts_by_issue = Counter()
+        self.reported_schema_ids = ()
+        self.selected_schema_ids = ()
+        self.selected_schema_bindings = ()
+        self.schema_assumed = False
+        self.orphan_multipart_failures = 0
+        self.cd_errors = []
+        for name in (
+            "cd_drift", "cd_have_lock", "cd_lock_ant", "cd_error_phaser",
+            "cd_error_averager", "cd_error_process", "cd_error_stage3",
+            "cd_powertop0", "cd_powertop1", "cd_powertop2", "cd_powertop3",
+            "cd_powerbot0", "cd_powerbot1", "cd_powerbot2", "cd_powerbot3",
+            "cd_fd0", "cd_fd1", "cd_fd2", "cd_fd3", "cd_sd0", "cd_sd1",
+            "cd_sd2", "cd_sd3", "cd_fdx", "cd_sdx", "cd_snr0", "cd_snr1",
+            "cd_snr2", "cd_snr3",
+        ):
+            setattr(self, name, np.array([]))
 
+    def _issue(self, code, message, *, record=None, fatal=True, details=None):
+        # Assembly failures have no single owning packet, so this records them
+        # on the collection and applies the same strict/non-strict policy.
+        issue = self.decode_status.add(
+            code,
+            message,
+            appid=None if record is None else record.original_appid,
+            source=None if record is None else record.basename,
+            fatal=fatal,
+            details=details,
+        )
+        if fatal and self.strict:
+            raise PacketDecodeError(issue, self.decode_status)
 
-            ## sometimes there is initial garbage to throw out
-            if appid_is_spectrum(appid) and meta_packet is None:
-                continue
-            if appid_is_tr_spectrum(appid) and meta_packet is None:
-                continue
-            
-            packet = Packet(appid, blob_fn=fn, version=version)
+    @staticmethod
+    def _packet_usable(packet):
+        # Diagnostic findings keep decoded fields available; only fatal issues
+        # make a packet unsafe to assemble into a collection product.
+        return not any(issue.fatal for issue in packet.decode_status.issues)
 
-            # Extract packet index from filename
-
-            packet_index = int(os.path.basename(fn).split('_')[0])
-            packet.packet_index = packet_index
-
-            # spectral/TR spectral packets must be read only after we set their metadata packet
-            # all other packets: read immediately
-            if not (appid_is_spectrum(appid) or appid_is_tr_spectrum(appid) or appid_is_cal_segmented_payload(appid)):
-                packet.read()
-            if appid_is_watchdog(appid):
-                packet.read()
-
-
-            if isinstance(packet, Packet_Metadata):
-                meta_packet = packet
-                self.spectra.append({"meta": packet})
-                tr_spectra.append({"meta": packet})
-
-            if appid_is_spectrum(appid):
-                if meta_packet is not None:
-                    packet.set_meta(meta_packet)
-                    packet.read()
-                    self.spectra[-1][appid & 0x0F] = packet
-
-            if appid_is_tr_spectrum(appid):
-                # print(f"TR appid = {appid}, from file {fn},  {fn.replace(".bin", "").split("_")[-1]}")
-                if meta_packet is not None:
-                    packet.set_meta(meta_packet)
-                    packet.read()
-                    tr_spectra[-1][appid & 0x0F] = packet
-
-            if isinstance(packet, Packet_Cal_Metadata):
-                self.calib_meta.append(packet)
-
-            if appid_is_cal_data(appid):
-                def to_cplx(a,b):
-                    return np.array(a,complex) + 1j*np.array(b)
-                if appid_is_cal_data_start(appid):
-                    packet.read()
-                    cal_packet_id = packet.unique_packet_id
-                    self.calib_data.append([np.array(data,complex) for data in packet.data])
-                else:
-                    packet.set_meta_id(cal_packet_id)
-                    packet.read()
-                    if packet.data_page == 1:
-                        for a, img_part  in zip(self.calib_data[-1], packet.data):
-                            a+= 1j*np.array(img_part)
-                    else:
-                        self.calib_gNacc.append(packet.gNacc)
-                        self.calib_gphase.append(packet.gphase)
-
-                
-            if appid_is_rawPFB(appid):
-                if appid_is_rawPFB_start(appid):
-                    packet.read()
-                    cal_packet_id = packet.unique_packet_id
-                    self.calib_pfb.append([np.array(packet.data,complex),None,None,None])
-                else:
-                    packet.set_meta_id(cal_packet_id)
-                    packet.read()
-                    ch = packet.channel
-                    part = packet.part
-                    if (part==0): # real part, comes first
-                        self.calib_pfb[-1][packet.channel] = np.array(packet.data, complex)
-                    else:
-                        self.calib_pfb[-1][packet.channel] += 1j*np.array(packet.data, complex)
-
-            if appid_is_cal_zoom(appid):
-                packet.read()
-                self.zoom_spectra_packets.append(packet)
-
-            if appid_is_cal_debug(appid):
-                if appid_is_cal_debug_start(appid):
-                    packet.read()
-                    cal_packet_id = packet.unique_packet_id
-                    self.calib_meta.append(packet.metadata)
-                    self.calib_debug.append([packet]+7*[None])
-                else:
-                    packet.set_meta_id(cal_packet_id)
-                    packet.read()
-                    self.calib_debug[-1][packet.debug_page]= packet
-
-            if isinstance(packet, Packet_Heartbeat):
-                self.heartbeat_packets.append(packet)
-
-            if isinstance(packet, Packet_Watchdog):
-                self.watchdog_packets.append(packet)
-
-            if isinstance(packet, Packet_Housekeep):
-                self.housekeeping_packets.append(packet)
-
-            if isinstance(packet, Packet_Waveform):
-                self.waveform_packets.append(packet)
-                waveforms[packet.ch] = packet
-                
-            if isinstance(packet, Packet_Waveform_Meta):
-                packet.set_packets(waveforms)
-                packet.read()
-                waveforms=[None,None,None,None]
-
-            self.cont.append(packet)
-            self.time.append(os.path.getmtime(fn))
-            try:
-                dt = self.time[-1] - self.time[0]
-                self.desc.append(
-                    f"{i:4d} : +{dt:4.1f}s : 0x{appid:0x} : {self.cont[-1].desc}"
+    def _discover(self):
+        records = []
+        for fn in glob.glob(os.path.join(self.dir, "*.bin")):
+            path = Path(fn)
+            match = PACKET_FILENAME_RE.fullmatch(path.name)
+            if match is None:
+                raise ValueError(f"invalid CDI packet filename {path.name!r}")
+            original_appid = int(match.group("appid"), 16)
+            records.append(
+                _PacketRecord(
+                    path=path,
+                    basename=path.name,
+                    packet_index=int(match.group("packet_index")),
+                    original_appid=original_appid,
+                    appid=normalize_dcb_appid(original_appid),
+                    mtime=path.stat().st_mtime,
                 )
-            except:
-                pass
-        pfb = [[],[],[],[]]
-        for c in self.calib:
-            if (c['pfb'][0] is not None) and (c['pfb'][1] is not None) and (c['pfb'][2] is not None) and (c['pfb'][3] is not None):
-                for i in range(4):
-                    pfb[i].append(c['pfb'][i])
-        if len(pfb[0])>0:
-            self.pfb = np.array([np.hstack(p) for p in self.pfb])
-        
-    
-        self.calib_gphase = np.array(self.calib_gphase)
-        self.calib_data = np.array(self.calib_data)
-        
-        if len(self.calib_gNacc)>0:
-            self.calib_gNacc = np.hstack(self.calib_gNacc)
-        dcalib = [c for c in self.calib_debug if None not in c]
-        ## we take drift packets for both debug and metadata but make sure we don't duplicate
-        drift_packets = [p for p in self.cont if (p.appid==id.AppID_Calibrator_Debug or (p.appid==id.AppID_Calibrator_MetaData and p.from_debug==False))]
-        
-        if len(drift_packets)>0:
-            self.cd_drift = np.hstack([p.drift for p in drift_packets])        
-        if self.verbose:
-            print ('# of calib debug entries', len(dcalib))
-        if len(dcalib)>0:
+            )
+        records.sort(
+            key=lambda record: (
+                record.packet_index,
+                record.appid,
+                record.basename.casefold(),
+                record.basename,
+            )
+        )
+        if self.cut_to_hello:
+            hello_indices = [
+                i for i, record in enumerate(records)
+                if appid_is_hello(record.appid)
+            ]
+            if hello_indices:
+                records = records[hello_indices[-1]:]
+
+        by_index = {}
+        for record in records:
+            by_index.setdefault(record.packet_index, []).append(record)
+        for packet_index, tied in sorted(by_index.items()):
+            if len(tied) > 1:
+                self._issue(
+                    "duplicate_numeric_index",
+                    f"numeric packet index {packet_index} occurs {len(tied)} times; deterministic AppID/name ordering was used",
+                    record=tied[0],
+                    fatal=False,
+                    details={
+                        "packet_index": packet_index,
+                        "filenames": [record.basename for record in tied],
+                    },
+                )
+        return records
+
+    @staticmethod
+    def _read_prefix(record, size):
+        try:
+            with record.path.open("rb") as source:
+                return source.read(size)
+        except OSError:
+            return b""
+
+    def _reported_version(self, record):
+        if appid_is_hello(record.appid):
+            prefix = self._read_prefix(record, 4)
+            return struct.unpack_from("<I", prefix, 0)[0] if len(prefix) == 4 else None
+        if (appid_is_metadata(record.appid)
+                or appid_is_housekeeping(record.appid)
+                or appid_is_cal_metadata(record.appid)):
+            prefix = self._read_prefix(record, 2)
+            return struct.unpack_from("<H", prefix, 0)[0] if len(prefix) == 2 else None
+        return None
+
+    def _schema_evidence(self, record):
+        if not (appid_is_housekeeping(record.appid)
+                or appid_is_cal_metadata(record.appid)):
+            return None
+        prefix = self._read_prefix(record, 12)
+        return SchemaEvidence(
+            appid=record.appid,
+            payload_length=record.path.stat().st_size,
+            housekeeping_type=(
+                struct.unpack_from("<H", prefix, 10)[0]
+                if appid_is_housekeeping(record.appid) and len(prefix) >= 12
+                else None
+            ),
+        )
+
+    def _segment_reported_version(self, records):
+        declarations = [
+            (record, version)
+            for record in records
+            if (version := self._reported_version(record)) is not None
+        ]
+        if not declarations:
+            return None, True
+        first_record, reported_version = declarations[0]
+        for record, version in declarations[1:]:
+            if version != reported_version:
+                self._issue(
+                    "declared_version_mismatch",
+                    f"packet reports schema 0x{version:X}, not session schema 0x{reported_version:X}",
+                    record=record,
+                    details={
+                        "session_source": first_record.basename,
+                        "session_version": reported_version,
+                        "packet_version": version,
+                    },
+                )
+                return reported_version, False
+        return reported_version, True
+
+    def _plan_segment(self, records):
+        # Select one binding from the whole Hello-delimited segment because the
+        # evidence distinguishing the two 306 ABIs may arrive after Hello.
+        reported_version, consistent = self._segment_reported_version(records)
+        if not consistent:
+            return []
+        evidence = tuple(
+            item
+            for record in records
+            if (item := self._schema_evidence(record)) is not None
+        )
+        try:
+            resolution = resolve_wire_version(
+                reported_version,
+                variant=(self.schema_variant if reported_version == 0x306 else None),
+                evidence=evidence,
+                diagnostic_override=self.diagnostic_override,
+            )
+        except SchemaResolutionError as exc:
+            # Dispatch is unsafe for the entire segment without one binding.
+            # Non-strict mode records that decision once and skips its files.
+            self._issue(exc.code, str(exc), record=records[0])
+            return []
+        return [_PlannedPacket(record, resolution) for record in records]
+
+    def _plan_schemas(self, records):
+        if not records:
+            self.selected_schema_ids = (LATEST_BINDING.canonical_schema_id,)
+            self.selected_schema_bindings = (LATEST_BINDING.binding_key,)
+            self.schema_assumed = True
+            return []
+
+        reported = []
+        for record in records:
+            version = self._reported_version(record)
+            if version is not None and version not in reported:
+                reported.append(version)
+        self.reported_schema_ids = tuple(reported)
+
+        segments = []
+        current = []
+        for record in records:
+            if appid_is_hello(record.appid) and current:
+                segments.append(current)
+                current = []
+            current.append(record)
+        if current:
+            segments.append(current)
+        planned = [
+            packet
+            for segment in segments
+            for packet in self._plan_segment(segment)
+        ]
+
+        selected_ids = []
+        selected_bindings = []
+        for packet in planned:
+            binding = packet.resolution.binding
+            if binding.canonical_schema_id not in selected_ids:
+                selected_ids.append(binding.canonical_schema_id)
+            if binding.binding_key not in selected_bindings:
+                selected_bindings.append(binding.binding_key)
+        self.selected_schema_ids = tuple(selected_ids)
+        self.selected_schema_bindings = tuple(selected_bindings)
+        self.schema_assumed = any(packet.resolution.schema_assumed for packet in planned)
+        return planned
+
+    def _flush_waveforms(self, state, *, boundary, record):
+        if state.active:
+            self._issue(
+                "orphan_waveform_group",
+                f"RawADC group without following metadata at {boundary}",
+                record=record,
+                details={"channels": sorted(state.packets), "packets_seen": state.seen},
+            )
+            state.clear()
+
+    def _flush_multipart(self, state, *, boundary, record):
+        if not state.active:
+            return
+        missing = sorted(set(range(state.page_count)) - set(state.pages))
+        self._issue(
+            "missing_multipart_page",
+            f"incomplete {state.family} group at {boundary}; missing pages {missing}",
+            record=record,
+            details={"family": state.family, "missing_pages": missing},
+        )
+        state.clear()
+
+    def _flush_boundaries(self, waveform_state, multipart_states, *, boundary, record):
+        self._flush_waveforms(waveform_state, boundary=boundary, record=record)
+        for state in multipart_states:
+            self._flush_multipart(state, boundary=boundary, record=record)
+
+    def _consume_waveform(self, packet, record, state):
+        if not state.active:
+            state.binding_key = packet.schema.binding_key
+        elif state.binding_key != packet.schema.binding_key:
+            state.valid = False
+            self._issue(
+                "declared_version_mismatch",
+                "RawADC group mixes schema bindings",
+                record=record,
+                details={
+                    "first_binding": state.binding_key,
+                    "packet_binding": packet.schema.binding_key,
+                },
+            )
+        state.seen += 1
+        packet.read()
+        if self._packet_usable(packet):
+            self.waveform_packets.append(packet)
+        else:
+            state.valid = False
+            return
+        if state.seen > 4:
+            state.valid = False
+            self._issue(
+                "too_many_waveforms",
+                "more than four RawADC packets precede metadata",
+                record=record,
+                details={"packets_seen": state.seen},
+            )
+            return
+        if not hasattr(packet, "ch"):
+            state.valid = False
+            return
+        channel = int(packet.ch)
+        if not 0 <= channel < 4:
+            state.valid = False
+            self._issue(
+                "invalid_waveform_channel",
+                f"RawADC channel {channel} is outside 0..3",
+                record=record,
+                details={"channel": channel},
+            )
+            return
+        if channel in state.packets:
+            state.valid = False
+            self._issue(
+                "duplicate_waveform_channel",
+                f"RawADC channel {channel} occurs twice before metadata",
+                record=record,
+                details={"channel": channel},
+            )
+            return
+        state.packets[channel] = packet
+
+    def _consume_waveform_metadata(self, packet, record, state):
+        if not state.active:
+            packet.read()
+            if self._packet_usable(packet):
+                self.waveform_metadata_packets.append(packet)
+            self._issue(
+                "raw_adc_metadata_without_waveforms",
+                "RawADC metadata has no preceding waveform group",
+                record=record,
+            )
+            return
+
+        schema_matches = state.binding_key == packet.schema.binding_key
+        if not schema_matches:
+            state.valid = False
+            self._issue(
+                "declared_version_mismatch",
+                "RawADC metadata and waveform group use different schemas",
+                record=record,
+                details={
+                    "waveform_binding": state.binding_key,
+                    "metadata_binding": packet.schema.binding_key,
+                },
+            )
+            packet.read()
+            if self._packet_usable(packet):
+                self.waveform_metadata_packets.append(packet)
+            if not state.packets:
+                self._issue(
+                    "raw_adc_metadata_without_usable_waveforms",
+                    "RawADC metadata follows only invalid waveform packets",
+                    record=record,
+                )
+            state.clear()
+            return
+        if not state.packets:
+            packet.read()
+            if self._packet_usable(packet):
+                self.waveform_metadata_packets.append(packet)
+            self._issue(
+                "raw_adc_metadata_without_usable_waveforms",
+                "RawADC metadata follows only invalid waveform packets",
+                record=record,
+            )
+            state.clear()
+            return
+        if not state.valid:
+            packet.read()
+            if self._packet_usable(packet):
+                self.waveform_metadata_packets.append(packet)
+            state.clear()
+            return
+
+        # Coreloop emits RawADC metadata after its waveforms, so association
+        # intentionally points backward to the pending waveform group.
+        packet.set_packets([state.packets.get(channel) for channel in range(4)])
+        if self._packet_usable(packet):
+            self.waveform_metadata_packets.append(packet)
+        else:
+            state.valid = False
+        if state.valid and schema_matches and hasattr(packet, "timestamp"):
+            self.waveform_groups.append(
+                {
+                    "packets": dict(sorted(state.packets.items())),
+                    "meta": packet,
+                    "schema_binding": packet.schema.binding_key,
+                }
+            )
+        state.clear()
+
+    @staticmethod
+    def _multipart_page(packet, state):
+        if isinstance(packet, Packet_Cal_Data):
+            return packet.appid - int(packet.schema.appids.AppID_Calibrator_Data)
+        if isinstance(packet, Packet_Cal_RawPFB):
+            return packet.appid - int(packet.schema.appids.AppID_Calibrator_RawPFB)
+        if isinstance(packet, Packet_Cal_Debug):
+            return packet.appid - int(packet.schema.appids.AppID_Calibrator_Debug)
+        raise TypeError(f"{state.family} received an incompatible packet")
+
+    def _publish_multipart(self, state):
+        pages = [state.pages[page] for page in range(state.page_count)]
+        if not state.valid or not all(self._packet_usable(packet) for packet in pages):
+            state.clear()
+            return
+        if state.family == "calibrator_data":
+            data = np.asarray(pages[0].data, dtype=complex)
+            data += 1j * np.asarray(pages[1].data)
+            self.calibrator_data_groups.append(
+                {
+                    "unique_packet_id": state.unique_packet_id,
+                    "pages": tuple(pages),
+                    "data": data,
+                    "gNacc": pages[2].gNacc,
+                    "gphase": np.asarray(pages[2].gphase).copy(),
+                    "schema_binding": state.binding_key,
+                }
+            )
+        elif state.family == "calibrator_raw_pfb":
+            data = np.asarray(
+                [
+                    np.asarray(pages[2 * channel].data, dtype=complex)
+                    + 1j * np.asarray(pages[2 * channel + 1].data)
+                    for channel in range(4)
+                ]
+            )
+            self.calibrator_pfb_groups.append(
+                {
+                    "unique_packet_id": state.unique_packet_id,
+                    "pages": tuple(pages),
+                    "data": data,
+                    "schema_binding": state.binding_key,
+                }
+            )
+        elif state.family == "calibrator_debug":
+            self.calib_debug.append(pages)
+            self.calibrator_debug_groups.append(
+                {
+                    "unique_packet_id": state.unique_packet_id,
+                    "pages": tuple(pages),
+                    "schema_binding": state.binding_key,
+                }
+            )
+        state.clear()
+
+    def _consume_multipart(self, packet, record, state):
+        page = self._multipart_page(packet, state)
+        if page == 0:
+            packet.read()
+            valid_start = self._packet_usable(packet) and hasattr(packet, "unique_packet_id")
+            packet_uid = int(packet.unique_packet_id) if valid_start else None
+            if state.active and valid_start and state.unique_packet_id == packet_uid:
+                state.valid = False
+                code = (
+                    "duplicate_multipart_page"
+                    if state.binding_key == packet.schema.binding_key
+                    else "declared_version_mismatch"
+                )
+                self._issue(
+                    code,
+                    f"duplicate {state.family} page 0",
+                    record=record,
+                    details={"family": state.family, "page": 0},
+                )
+                return
+            if state.active:
+                self._flush_multipart(state, boundary="new start page", record=record)
+            if not valid_start:
+                return
+            state.unique_packet_id = packet_uid
+            state.binding_key = packet.schema.binding_key
+            state.pages[0] = packet
+        else:
+            if not state.active or state.unique_packet_id is None:
+                packet.read()
+                if not packet.decode_status.has("orphan_multipart_page"):
+                    self._issue(
+                        "orphan_multipart_page",
+                        f"{state.family} continuation page {page} has no start page",
+                        record=record,
+                        details={"family": state.family, "page": page},
+                    )
+                return
+            packet.set_meta_id(state.unique_packet_id)
+            packet.read()
+            if page in state.pages:
+                state.valid = False
+                self._issue(
+                    "duplicate_multipart_page",
+                    f"duplicate {state.family} page {page}",
+                    record=record,
+                    details={"family": state.family, "page": page},
+                )
+                return
+            if state.binding_key != packet.schema.binding_key:
+                state.valid = False
+                self._issue(
+                    "declared_version_mismatch",
+                    f"{state.family} group mixes schema bindings",
+                    record=record,
+                    details={
+                        "first_binding": state.binding_key,
+                        "packet_binding": packet.schema.binding_key,
+                    },
+                )
+            if (not self._packet_usable(packet)
+                    or packet.decode_status.has("unique_packet_id_mismatch")):
+                state.valid = False
+            state.pages[page] = packet
+        if len(state.pages) == state.page_count:
+            self._publish_multipart(state)
+
+    @staticmethod
+    def _debug_error_register(packet):
+        """Rebuild typed counters when older bindings expose raw error_regs bytes."""
+
+        metadata = getattr(packet, "metadata", None)
+        if metadata is None:
+            return None
+        if hasattr(metadata, "error_reg"):
+            return metadata.error_reg
+        raw = getattr(metadata, "error_regs", None)
+        if raw is None:
+            return None
+        for type_name in (
+            "calibrator_error_reg", "calibrator_errors",
+            "struct_calibrator_error_reg", "struct_calibrator_errors",
+        ):
+            error_type = getattr(packet.schema.pystruct, type_name, None)
+            if error_type is None or ctypes.sizeof(error_type) < ctypes.sizeof(raw):
+                continue
+            error = error_type()
+            ctypes.memmove(ctypes.addressof(error), bytes(raw), ctypes.sizeof(raw))
+            return error
+        return None
+
+    def _finalize_compatibility_arrays(self):
+        """Populate legacy arrays only from complete validated multipart groups."""
+
+        if self.calibrator_data_groups:
+            self.calib_data = np.asarray(
+                [group["data"] for group in self.calibrator_data_groups]
+            )
+            self.calib_gNacc = np.asarray(
+                [group["gNacc"] for group in self.calibrator_data_groups]
+            )
+            self.calib_gphase = np.asarray(
+                [group["gphase"] for group in self.calibrator_data_groups]
+            )
+        self.calib_pfb = (
+            np.asarray([group["data"] for group in self.calibrator_pfb_groups])
+            if self.calibrator_pfb_groups else np.array([])
+        )
+        self.pfb = self.calib_pfb
+
+        complete_starts = {group[0] for group in self.calib_debug}
+        self.calib_meta = [
+            packet if isinstance(packet, Packet_Cal_Metadata) else packet.metadata
+            for packet in self.cont
+            if (
+                isinstance(packet, Packet_Cal_Metadata) and self._packet_usable(packet)
+            ) or (
+                isinstance(packet, Packet_Cal_Debug)
+                and packet in complete_starts
+                and hasattr(packet, "metadata")
+            )
+        ]
+        if self.calib_debug:
+            dcalib = self.calib_debug
             self.cd_have_lock = np.hstack([c[0].have_lock for c in dcalib])
             self.cd_lock_ant = np.hstack([c[0].lock_ant for c in dcalib])
-            self.cd_errors = [c[0].metadata.error_reg for c in dcalib]
-            # phase errors are 8 bits over two counter
-            def get_counters(num):
-                return [num&0xFF, (num>>8)&0xFF , (num>>16)&0xFF, (num>>24)&0xFF] 
+            self.cd_errors = [
+                error for c in dcalib
+                if (error := self._debug_error_register(c[0])) is not None
+            ]
+            if len(self.cd_errors) == len(dcalib):
+                # phase errors are 8 bits over two counter
+                def get_counters(num):
+                    return [num&0xFF, (num>>8)&0xFF , (num>>16)&0xFF, (num>>24)&0xFF]
 
-            self.cd_error_phaser = np.array([(get_counters(x.cal_phaser_err[0])+get_counters(x.cal_phaser_err[1])) for x in self.cd_errors])
-            self.cd_error_averager = np.array([[get_counters(x.averager_err[r]) for r in range(16)] for x in self.cd_errors])
-            self.cd_error_process = np.array([np.hstack([get_counters(x.averager_err[r]) for r in range(8)]) for x in self.cd_errors])
-            self.cd_error_stage3 = np.array([np.hstack([get_counters(x.stage3_err[r]) for r in range(4)]) for x in self.cd_errors])
-            
-
-            
+                self.cd_error_phaser = np.array([(get_counters(x.cal_phaser_err[0])+get_counters(x.cal_phaser_err[1])) for x in self.cd_errors])
+                self.cd_error_averager = np.array([[get_counters(x.averager_err[r]) for r in range(16)] for x in self.cd_errors])
+                self.cd_error_process = np.array([np.hstack([get_counters(x.process_err[r]) for r in range(8)]) for x in self.cd_errors])
+                self.cd_error_stage3 = np.array([np.hstack([get_counters(x.stage3_err[r]) for r in range(4)]) for x in self.cd_errors])
             self.cd_powertop0 = np.hstack([c[0].powertop0 for c in dcalib])
             self.cd_powertop1 = np.hstack([c[1].powertop1 for c in dcalib])
             self.cd_powertop2 = np.hstack([c[1].powertop2 for c in dcalib])
@@ -244,17 +699,159 @@ class Collection:
             self.cd_snr2 = np.hstack([c[7].snr2 for c in dcalib])
             self.cd_snr3 = np.hstack([c[7].snr3 for c in dcalib])
 
+        # we take drift packets for both debug and metadata but make sure we don't duplicate
+        drift_packets = [
+            packet for packet in self.cont
+            if hasattr(packet, "drift") and (
+                isinstance(packet, Packet_Cal_Metadata)
+                or (
+                    isinstance(packet, Packet_Cal_Debug)
+                    and packet in complete_starts
+                )
+            )
+        ]
+        if drift_packets:
+            self.cd_drift = np.hstack([packet.drift for packet in drift_packets])
+        grimm = [
+            packet.data for packet in self.cont
+            if isinstance(packet, Packet_Grimm)
+            and self._packet_usable(packet)
+            and hasattr(packet, "data")
+        ]
+        self.grimm_spectra = np.vstack(grimm) if grimm else []
 
+    def _update_summaries(self):
+        for packet in self.cont:
+            self.decode_status.extend(packet.decode_status.issues)
+        self.invalid_counts_by_issue = Counter(self.decode_status.codes)
+        boundary_codes = {
+            "orphan_multipart_page", "missing_multipart_page",
+            "duplicate_multipart_page", "orphan_waveform_group",
+            "raw_adc_metadata_without_waveforms",
+            "raw_adc_metadata_without_usable_waveforms",
+        }
+        self.orphan_multipart_failures = sum(
+            count for code, count in self.invalid_counts_by_issue.items()
+            if code in boundary_codes
+        )
 
+    def _append_packet(self, packet, record, ordinal):
+        self.cont.append(packet)
+        self.time.append(record.mtime)
+        dt = record.mtime - self.time[0]
+        self.desc.append(
+            f"{ordinal:4d} : +{dt:4.1f}s : 0x{record.original_appid:0x} : {packet.desc}"
+        )
 
+    def refresh(self, quiet=False):
+        self._reset_outputs()
+        records = self._discover()
+        self.packet_counts_by_appid.update(record.original_appid for record in records)
+        if not quiet:
+            print(f"Analyzing {len(records)} files from {self.dir}.")
+        planned = self._plan_schemas(records)
+        meta_packet = None
+        tr_spectra = []
+        waveform_state = _WaveformState()
+        data_state = _MultipartState("calibrator_data", 3)
+        pfb_state = _MultipartState("calibrator_raw_pfb", 8)
+        debug_state = _MultipartState("calibrator_debug", 8)
+        multipart_states = (data_state, pfb_state, debug_state)
 
+        for i, item in enumerate(planned):
+            record = item.record
+            if self.verbose:
+                print("Reading ", record.path)
+            if appid_is_hello(record.appid):
+                self._flush_boundaries(
+                    waveform_state,
+                    multipart_states,
+                    boundary="Hello",
+                    record=record,
+                )
+                meta_packet = None
+
+            resolution = item.resolution
+            packet = Packet(
+                record.original_appid,
+                blob_fn=str(record.path),
+                schema=resolution.binding,
+                reported_version=resolution.reported_version,
+                schema_assumed=resolution.schema_assumed,
+                diagnostic_override=self.diagnostic_override,
+                strict=self.strict,
+            )
+            packet.packet_index = record.packet_index
+
+            if isinstance(packet, Packet_Metadata):
+                packet.read()
+                meta_packet = None
+                if self._packet_usable(packet):
+                    meta_packet = packet
+                    self.spectra.append({"meta": packet})
+                    tr_spectra.append({"meta": packet})
+            elif isinstance(packet, Packet_Spectrum):
+                if meta_packet is not None:
+                    packet.set_meta(meta_packet)
+                packet.read()
+                if (self._packet_usable(packet) and meta_packet is not None
+                        and hasattr(packet, "product") and self.spectra):
+                    self.spectra[-1][packet.product] = packet
+            elif isinstance(packet, Packet_TR_Spectrum):
+                if meta_packet is not None:
+                    packet.set_meta(meta_packet)
+                packet.read()
+                if (self._packet_usable(packet) and meta_packet is not None
+                        and hasattr(packet, "product") and tr_spectra):
+                    tr_spectra[-1][packet.product] = packet
+            elif isinstance(packet, Packet_Cal_Data):
+                self._consume_multipart(packet, record, data_state)
+            elif isinstance(packet, Packet_Cal_RawPFB):
+                self._consume_multipart(packet, record, pfb_state)
+            elif isinstance(packet, Packet_Cal_Debug):
+                self._consume_multipart(packet, record, debug_state)
+            elif isinstance(packet, Packet_Cal_ZoomSpectra):
+                packet.read()
+                if self._packet_usable(packet):
+                    self.zoom_spectra_packets.append(packet)
+            elif isinstance(packet, Packet_Waveform):
+                self._consume_waveform(packet, record, waveform_state)
+            elif isinstance(packet, Packet_Waveform_Meta):
+                self._consume_waveform_metadata(packet, record, waveform_state)
+            else:
+                packet.read()
+
+            if isinstance(packet, Packet_Hello) and self.verbose and self._packet_usable(packet):
+                print (f"Detected FW version: {packet.SW_version:X}")
+            if isinstance(packet, Packet_Heartbeat) and self._packet_usable(packet):
+                self.heartbeat_packets.append(packet)
+            if isinstance(packet, Packet_Watchdog) and self._packet_usable(packet):
+                self.watchdog_packets.append(packet)
+            if isinstance(packet, Packet_Housekeep) and self._packet_usable(packet):
+                self.housekeeping_packets.append(packet)
+            self._append_packet(packet, record, i)
+            if isinstance(packet, Packet_EOS):
+                self._flush_boundaries(
+                    waveform_state,
+                    multipart_states,
+                    boundary="EOS",
+                    record=record,
+                )
+                meta_packet = None
+
+        self._flush_boundaries(
+            waveform_state,
+            multipart_states,
+            boundary="end of input",
+            record=None,
+        )
         # we don't always send TR spectra; if dict contains only metadata
         # packet but no actual data, we assume it's fine and don't include it into self.tr_spectra
         self.tr_spectra = [trs for trs in tr_spectra if len(trs) > 1]
-        self.grimm_spectra = [P.data for P in self.cont if P.appid == id.AppID_SpectraGrimm]
-        if len(self.grimm_spectra)>0:
-            self.grimm_spectra = np.vstack(self.grimm_spectra)
-        assert all(["meta" in trs for trs in tr_spectra])
+        self._finalize_compatibility_arrays()
+        self._update_summaries()
+        if self.verbose:
+            print('# of calib debug entries', len(self.calib_debug))
 
     def __len__(self):
         return len(self.cont)
@@ -440,3 +1037,9 @@ class Collection:
             return S[product].data
         
         assert(False), "Should not reach here"
+
+    def canonical_report(self):
+        """Return a deterministic, path-free semantic snapshot."""
+
+        from .collection_report import canonical_report
+        return canonical_report(self)
