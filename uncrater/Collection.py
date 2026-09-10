@@ -18,6 +18,7 @@ from .error_utils import *
 from .constants import NPRODUCTS, NCHANNELS
 from .decode_status import DecodeStatus, PacketDecodeError
 from .schema_registry import SchemaEvidence, SchemaResolutionError, resolve_wire_version
+from .waveform_association import associate_waveforms
 
 
 # Packet filenames are the only source of acquisition order and the original
@@ -57,27 +58,11 @@ class _MultipartState:
         self.valid = True
 
 
-# Pending RawADC channels awaiting their following metadata packet
-@dataclass
-class _WaveformState:
-    packets: dict[int, Packet_Waveform] = field(default_factory=dict)
-    seen: int = 0
-    valid: bool = True
-
-    @property
-    def active(self):
-        return self.seen > 0
-
-    def clear(self):
-        self.packets.clear()
-        self.seen = 0
-        self.valid = True
-
-
 class Collection:
 
     def __init__(self, dir, verbose = False, cut_to_hello = False, *,
-                 strict=False, diagnostic_override=False, schema_variant=None):
+                 strict=False, diagnostic_override=False, schema_variant=None,
+                 waveform_packet_context=None):
         """Decode and assemble the packet files in a CDI directory.
 
         dir names the directory; verbose prints packet-level progress, and
@@ -85,7 +70,9 @@ class Collection:
         strict=False records fatal issues and skips invalid products; strict=True
         raises on the first fatal decode or assembly issue.
         diagnostic_override permits an unknown reported version to use the
-        latest schema while recording that assumption. schema_variant may be
+        latest schema while recording that assumption. waveform_packet_context
+        optionally supplies source ordering and CCSDS spans to the waveform
+        associator; see associate_waveforms(). schema_variant may be
         'early' or 'final' and must agree with structural 0x306 evidence.
         """
         self.verbose = verbose
@@ -94,6 +81,7 @@ class Collection:
         self.strict = strict
         self.diagnostic_override = diagnostic_override
         self.schema_variant = schema_variant
+        self.waveform_packet_context = waveform_packet_context
         self.refresh()
 
     # Initialize decoded products, compatibility arrays, and status summaries
@@ -109,6 +97,7 @@ class Collection:
         self.waveform_packets = []
         self.waveform_metadata_packets = []
         self.waveform_groups = []
+        self.unresolved_waveforms = []
         self.zoom_spectra_packets = []
         self.calib_meta = []
         self.calib_debug = []
@@ -279,93 +268,6 @@ class Collection:
         self.selected_schema_bindings = (binding.binding_key,)
         self.schema_assumed = resolution.schema_assumed
         return resolution
-
-    # Accumulate one RawADC channel for association with following metadata
-    def _consume_waveform(self, packet, record, state):
-        state.seen += 1
-        packet.read()
-        if self._packet_usable(packet):
-            self.waveform_packets.append(packet)
-        else:
-            state.valid = False
-            return
-        if state.seen > 4:
-            state.valid = False
-            self._issue(
-                "too_many_waveforms",
-                "more than four RawADC packets precede metadata",
-                record=record,
-                details={"packets_seen": state.seen},
-            )
-            return
-        channel = packet.ch
-        if not 0 <= channel < 4:
-            state.valid = False
-            self._issue(
-                "invalid_waveform_channel",
-                f"RawADC channel {channel} is outside 0..3",
-                record=record,
-                details={"channel": channel},
-            )
-            return
-        if channel in state.packets:
-            state.valid = False
-            self._issue(
-                "duplicate_waveform_channel",
-                f"RawADC channel {channel} occurs twice before metadata",
-                record=record,
-                details={"channel": channel},
-            )
-            return
-        state.packets[channel] = packet
-
-    # Validate and publish the waveform group completed by this metadata packet
-    def _consume_waveform_metadata(self, packet, record, state):
-        if not state.active:
-            packet.read()
-            if self._packet_usable(packet):
-                self.waveform_metadata_packets.append(packet)
-            self._issue(
-                "raw_adc_metadata_without_waveforms",
-                "RawADC metadata has no preceding waveform group",
-                record=record,
-            )
-            return
-
-        if not state.packets:
-            packet.read()
-            if self._packet_usable(packet):
-                self.waveform_metadata_packets.append(packet)
-            self._issue(
-                "raw_adc_metadata_without_usable_waveforms",
-                "RawADC metadata follows only invalid waveform packets",
-                record=record,
-            )
-            state.clear()
-            return
-        if not state.valid:
-            packet.read()
-            if self._packet_usable(packet):
-                self.waveform_metadata_packets.append(packet)
-            state.clear()
-            return
-
-        # Coreloop emits RawADC metadata after its waveforms, so association
-        # intentionally points backward to the pending waveform group.
-        packet.set_packets([state.packets.get(channel) for channel in range(4)])
-        if self._packet_usable(packet):
-            self.waveform_metadata_packets.append(packet)
-        else:
-            state.valid = False
-        if state.valid:
-            self.waveform_groups.append(
-                {
-                    "packets": dict(sorted(state.packets.items())),
-                    "meta": packet,
-                    "schema_binding": packet.schema.binding_key,
-                }
-            )
-        state.clear()
 
     # Map a calibrator AppID to its zero-based page within the pending group
     @staticmethod
@@ -605,7 +507,6 @@ class Collection:
         resolution = self._resolve_schema(records)
         meta_packet = None
         tr_spectra = []
-        waveform_state = _WaveformState()
         data_state = _MultipartState("calibrator_data", 3)
         pfb_state = _MultipartState("calibrator_raw_pfb", 8)
         debug_state = _MultipartState("calibrator_debug", 8)
@@ -616,7 +517,6 @@ class Collection:
                 print("Reading ", record.path)
             if appid_is_hello(record.appid):
                 self._flush_boundaries(
-                    waveform_state,
                     multipart_states,
                     boundary="Hello",
                     record=record,
@@ -663,9 +563,13 @@ class Collection:
                 if self._packet_usable(packet):
                     self.zoom_spectra_packets.append(packet)
             elif isinstance(packet, Packet_Waveform):
-                self._consume_waveform(packet, record, waveform_state)
+                packet.read()
+                if self._packet_usable(packet):
+                    self.waveform_packets.append(packet)
             elif isinstance(packet, Packet_Waveform_Meta):
-                self._consume_waveform_metadata(packet, record, waveform_state)
+                packet.read()
+                if self._packet_usable(packet):
+                    self.waveform_metadata_packets.append(packet)
             else:
                 packet.read()
 
@@ -681,7 +585,6 @@ class Collection:
             self._append_packet(packet, record, i)
             if isinstance(packet, Packet_EOS):
                 self._flush_boundaries(
-                    waveform_state,
                     multipart_states,
                     boundary="EOS",
                     record=record,
@@ -689,7 +592,6 @@ class Collection:
                 meta_packet = None
 
         self._flush_boundaries(
-            waveform_state,
             multipart_states,
             boundary="end of input",
             record=None,
@@ -697,6 +599,19 @@ class Collection:
         # we don't always send TR spectra; if dict contains only metadata
         # packet but no actual data, we assume it's fine and don't include it into self.tr_spectra
         self.tr_spectra = [trs for trs in tr_spectra if len(trs) > 1]
+        associations = associate_waveforms(
+            self.cont,
+            packet_context=self.waveform_packet_context if resolution is not None else None,
+        )
+        self.waveform_groups = associations.groups
+        self.unresolved_waveforms = associations.unresolved
+        for unresolved in self.unresolved_waveforms:
+            self._issue(
+                "unresolved_waveform_metadata",
+                "RawADC samples and metadata retained without an inferred association",
+                fatal=False,
+                details=unresolved,
+            )
         self._finalize_compatibility_arrays()
         self._update_summaries()
         if self.verbose:
@@ -955,17 +870,6 @@ class Collection:
             file=sys.stderr,
         )
 
-    # Reject a waveform group left incomplete at a session boundary
-    def _flush_waveforms(self, state, *, boundary, record):
-        if state.active:
-            self._issue(
-                "orphan_waveform_group",
-                f"RawADC group without following metadata at {boundary}",
-                record=record,
-                details={"channels": sorted(state.packets), "packets_seen": state.seen},
-            )
-            state.clear()
-
     # Reject a calibrator group left incomplete at a session boundary
     def _flush_multipart(self, state, *, boundary, record):
         if not state.active:
@@ -980,8 +884,7 @@ class Collection:
         state.clear()
 
     # Flush every pending multipart family at Hello, EOS, or end of input
-    def _flush_boundaries(self, waveform_state, multipart_states, *, boundary, record):
-        self._flush_waveforms(waveform_state, boundary=boundary, record=record)
+    def _flush_boundaries(self, multipart_states, *, boundary, record):
         for state in multipart_states:
             self._flush_multipart(state, boundary=boundary, record=record)
 

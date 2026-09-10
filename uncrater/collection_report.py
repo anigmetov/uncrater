@@ -160,6 +160,7 @@ def canonical_report(collection):
                 if isinstance(collection.grimm_spectra, np.ndarray) else []
             ),
         },
+        "unresolved_waveforms": collection.unresolved_waveforms,
         "associations": {
             "science": spectrum_associations(collection.spectra),
             "tr_spectra": spectrum_associations(collection.tr_spectra),

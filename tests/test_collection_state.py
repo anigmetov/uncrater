@@ -127,6 +127,9 @@ class FakeWaveformMeta(FakePacket):
     def read(self):
         super().read()
         self.timestamp = 1234
+        self.unique_packet_id = self.packet_index
+        self.time_32 = 16
+        self.time_16 = 0
 
     def set_packets(self, packets):
         self.read()
@@ -279,6 +282,9 @@ def install_fake_packets(monkeypatch, call_log=None):
     }
     for name, packet_type in replacements.items():
         monkeypatch.setattr(collection_module, name, packet_type)
+        waveform_module = importlib.import_module("uncrater.waveform_association")
+        if hasattr(waveform_module, name):
+            monkeypatch.setattr(waveform_module, name, packet_type)
 
     def factory(appid, blob_fn, schema, **kwargs):
         if appid == 0x20F:
@@ -339,7 +345,7 @@ def write_packet(root, index, appid, payload=b"", label=None):
     return path
 
 
-def test_tied_indices_use_stable_order_and_metadata_attaches_backward(monkeypatch, tmp_path):
+def test_tied_indices_use_stable_order_and_partial_group_remains_ambiguous(monkeypatch, tmp_path):
     calls = []
     install_fake_packets(monkeypatch, calls)
     write_packet(tmp_path, 10, 0x2F1)
@@ -349,13 +355,12 @@ def test_tied_indices_use_stable_order_and_metadata_attaches_backward(monkeypatc
     collection = Collection(tmp_path)
 
     assert [call["appid"] for call in calls] == [0x2F0, 0x2F1, 0x2FA]
-    assert collection.invalid_counts_by_issue == {"duplicate_numeric_index": 1}
-    assert list(collection.waveform_groups[0]["packets"]) == [0, 1]
-    assert all(packet.meta is collection.waveform_groups[0]["meta"]
-               for packet in collection.waveform_packets)
+    assert collection.invalid_counts_by_issue == {"duplicate_numeric_index": 1, "unresolved_waveform_metadata": 3}
+    assert collection.waveform_groups == []
+    assert all(packet.meta is None for packet in collection.waveform_packets)
 
 
-def test_fifth_repeated_waveform_is_rejected_by_received_count(monkeypatch, tmp_path):
+def test_repeated_waveforms_are_retained_without_ambiguous_metadata(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     for index in range(5):
         write_packet(tmp_path, index, 0x2F0)
@@ -363,23 +368,25 @@ def test_fifth_repeated_waveform_is_rejected_by_received_count(monkeypatch, tmp_
 
     collection = Collection(tmp_path, strict=False)
 
-    assert collection.invalid_counts_by_issue["duplicate_waveform_channel"] == 3
-    assert collection.invalid_counts_by_issue["too_many_waveforms"] == 1
+    assert collection.invalid_counts_by_issue == {"unresolved_waveform_metadata": 6}
+    assert len(collection.waveform_packets) == 5
     assert collection.waveform_groups == []
     assert all(packet.meta is None for packet in collection.waveform_packets)
-    assert all(packet.timestamp == -1 for packet in collection.waveform_packets)
+    assert all(packet.timestamp == 0xFFFFFFFFFFFFFFFF for packet in collection.waveform_packets)
 
 
-def test_malformed_waveform_invalidates_its_group(monkeypatch, tmp_path):
+def test_malformed_waveform_preserves_valid_siblings(monkeypatch, tmp_path):
     install_fake_packets(monkeypatch)
     write_packet(tmp_path, 0, 0x2F0, label="malformed")
     write_packet(tmp_path, 1, 0x2F1)
-    write_packet(tmp_path, 2, 0x2FA)
+    write_packet(tmp_path, 2, 0x2F2)
+    write_packet(tmp_path, 3, 0x2F3)
+    write_packet(tmp_path, 4, 0x2FA)
 
     collection = Collection(tmp_path, strict=False)
 
     assert collection.invalid_counts_by_issue == {"bad_blob_length": 1}
-    assert collection.waveform_groups == []
+    assert list(collection.waveform_groups[0]["packets"]) == [1, 2, 3]
 
 
 def test_default_nonstrict_warns_and_skips_bad_calibrator_metadata(
@@ -439,8 +446,7 @@ def test_metadata_after_invalid_only_waveforms_is_reported(monkeypatch, tmp_path
     collection = Collection(tmp_path, strict=False)
 
     assert collection.invalid_counts_by_issue == {
-        "invalid_waveform_channel": 1,
-        "raw_adc_metadata_without_usable_waveforms": 1,
+        "unresolved_waveform_metadata": 1,
     }
     assert collection.waveform_groups == []
 
@@ -453,8 +459,8 @@ def test_eos_and_end_flush_orphan_waveform_groups(monkeypatch, tmp_path):
 
     collection = Collection(tmp_path, strict=False)
 
-    assert collection.invalid_counts_by_issue == {"orphan_waveform_group": 2}
-    assert collection.orphan_multipart_failures == 2
+    assert collection.invalid_counts_by_issue == {"unresolved_waveform_metadata": 2}
+    assert collection.orphan_multipart_failures == 0
 
 
 def test_hello_resets_science_waveform_and_multipart_state(monkeypatch, tmp_path):
@@ -470,7 +476,7 @@ def test_hello_resets_science_waveform_and_multipart_state(monkeypatch, tmp_path
     assert collection.invalid_counts_by_issue == {
         "missing_metadata": 1,
         "missing_multipart_page": 1,
-        "orphan_waveform_group": 1,
+        "unresolved_waveform_metadata": 1,
     }
     assert len(collection.spectra) == 1
     assert list(collection.spectra[0]) == ["meta"]

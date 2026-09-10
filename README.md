@@ -73,7 +73,32 @@ back to the first fixed packet-version prefix. The 0x306 layouts still require
 structural housekeeping or calibrator evidence because both report the same
 version. RawADC is intentionally different from normal spectra: coreloop emits
 waveform metadata after the waveform group, so Collection associates that
-metadata with the preceding waveforms.
+metadata with the preceding waveforms. Delayed metadata may complete several
+captures in stream order, independently of where metadata arrives between
+waveform packets. Firmware emits either one selected channel or all four in
+order 0,1,2,3. The complete interval determines the possible capture groupings;
+only associations shared by every grouping are published. Unexplained counts
+and ambiguous partial captures remain unresolved. Corrupt packets keep
+their place in this accounting, and valid waveform channels remain available
+even when metadata is absent. Hello and EOS in the same source stream delimit
+independent intervals; duplicate metadata UIDs or backward mission times make
+an interval ambiguous.
+
+`Collection.unresolved_waveforms` and the canonical report retain unresolved
+packet associations, including the values of unmatched valid metadata.
+Re-reading all accumulated input recomputes the associations, so a later
+metadata packet can complete an earlier incomplete capture. Optional
+`waveform_packet_context` supplies original order within each source bank.
+CCSDS spans are retained as provenance; they do not imply per-APID counters.
+Cross-bank Hello/EOS placement cannot be recovered from bank concatenation.
+An explicit `metadata_packet_index` (or null) in every context entry replays a
+complete-input association without rematching session subsets. Referenced
+packets, source banks, and channel uniqueness are validated again.
+
+Without reliable transport-loss evidence, some losses fit another capture
+grouping: four singleton channels with three lost metadata packets resemble
+one intact quartet. The decoder cannot distinguish those inputs. No time or
+metadata interpolation is performed.
 
 ## Decoder tests
 
