@@ -17,7 +17,7 @@ from .Packet import *
 from .error_utils import *
 from .constants import NPRODUCTS, NCHANNELS
 from .decode_status import DecodeStatus, PacketDecodeError
-from .schema_registry import SchemaEvidence, SchemaResolutionError, resolve_wire_version
+from .schema_registry import SchemaEvidence, SchemaResolutionError, resolve_wire_version, resolve_packet_stream
 from .waveform_association import associate_waveforms
 
 
@@ -62,7 +62,7 @@ class Collection:
 
     def __init__(self, dir, verbose = False, cut_to_hello = False, *,
                  strict=False, diagnostic_override=False, schema_variant=None,
-                 waveform_packet_context=None):
+                 waveform_packet_context=None, schema_resolution=None):
         """Decode and assemble the packet files in a CDI directory.
 
         dir names the directory; verbose prints packet-level progress, and
@@ -72,7 +72,9 @@ class Collection:
         diagnostic_override permits an unknown reported version to use the
         latest schema while recording that assumption. waveform_packet_context
         optionally supplies source ordering and CCSDS spans to the waveform
-        associator; see associate_waveforms(). schema_variant may be
+        associator; see associate_waveforms(). schema_resolution supplies
+        validated full-input evidence for a subset, which must agree with all
+        local version prefixes and structural evidence. schema_variant may be
         'early' or 'final' and must agree with structural 0x306 evidence.
         """
         self.verbose = verbose
@@ -82,6 +84,7 @@ class Collection:
         self.diagnostic_override = diagnostic_override
         self.schema_variant = schema_variant
         self.waveform_packet_context = waveform_packet_context
+        self.schema_resolution = schema_resolution
         self.refresh()
 
     # Initialize decoded products, compatibility arrays, and status summaries
@@ -249,12 +252,21 @@ class Collection:
             if (item := self._schema_evidence(record)) is not None
         ) if reported_version == 0x306 else ()
         try:
-            resolution = resolve_wire_version(
-                reported_version,
-                variant=(self.schema_variant if reported_version == 0x306 else None),
-                evidence=evidence,
-                diagnostic_override=self.diagnostic_override,
-            )
+            if self.schema_resolution is None:
+                resolution = resolve_wire_version(
+                    reported_version,
+                    variant=(self.schema_variant if reported_version == 0x306 else None),
+                    evidence=evidence,
+                    diagnostic_override=self.diagnostic_override,
+                )
+            else:
+                # Only schema-bearing packets are needed; spectra may be large
+                resolution = resolve_packet_stream(
+                    ((record.appid, record.path.read_bytes()) for record in records
+                     if record.appid in (0x209, 0x206, 0x20F, 0x280)),
+                    inherited=self.schema_resolution, variant=self.schema_variant,
+                    diagnostic_override=self.diagnostic_override,
+                )
         except SchemaResolutionError as exc:
             self._issue(
                 exc.code,
@@ -263,6 +275,10 @@ class Collection:
             )
             return None
 
+        if self.schema_resolution is not None:
+            # Versionless subsets inherit the validated input version too
+            self.reported_schema_ids = (() if resolution.reported_version is None
+                                        else (resolution.reported_version,))
         binding = resolution.binding
         self.selected_schema_ids = (binding.canonical_schema_id,)
         self.selected_schema_bindings = (binding.binding_key,)
@@ -528,6 +544,7 @@ class Collection:
                 blob_fn=record.path,
                 schema=resolution.binding,
                 reported_version=resolution.reported_version,
+                evidence=resolution.evidence or None,
                 diagnostic_override=self.diagnostic_override,
                 strict=self.strict,
             )

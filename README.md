@@ -45,8 +45,8 @@ Packets are dispatched using both their AppID and selected wire schema. The
 package contains frozen bindings for `0x203`, `0x305`, the verified early and
 final `0x306` layouts, and the latest shipped `0x307` layout. Known but
 unverified schemas (`0x300`, `0x302`, `0x308`, and `0x309`) fail closed.
-Because `0x306` names two different ABIs, it requires a verified variant or
-discriminating packet evidence:
+Because `0x306` names two different ABIs, it requires discriminating packet
+evidence. An explicit variant must agree with that evidence:
 
 ```python
 from uncrater.schema_registry import SchemaEvidence, binding_for_wire_version
@@ -60,6 +60,20 @@ binding = binding_for_wire_version(
     ),
 )
 ```
+
+`resolve_packet_stream()` accepts `(AppID, bytes)` pairs and resolves one
+immutable schema selection before typed packet decoding. It rejects mixed
+reported versions and contradictory structural evidence. Pass the result as
+`Collection(..., schema_resolution=resolution)` when decoding a subset of that
+input. The subset may lack discriminating housekeeping, but its version
+prefixes and any structural evidence must agree with the inherited selection.
+The inherited proof also appears as `input_schema` in the canonical report.
+
+Use `schema_resolution_record()` and `schema_resolution_from_record()` to
+persist and restore the selection. Restoration re-runs the resolver and checks
+the binding fingerprint. Individual `Packet` reads use both
+`schema=resolution.binding` and `evidence=resolution.evidence`, including
+housekeeping subtypes that cannot distinguish the two 306 layouts on their own.
 
 If a collection has no usable version evidence, decoding uses the latest binding
 and records that the schema was assumed. `Collection` is non-strict by default:

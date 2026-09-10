@@ -23,6 +23,9 @@ from uncrater.schema_registry import (
     binding_for_wire_version,
     evidence_from_packet,
     resolve_wire_version,
+    resolve_packet_stream,
+    schema_resolution_record,
+    schema_resolution_from_record,
     schema_assumed_for,
 )
 
@@ -284,3 +287,78 @@ def test_variant_is_rejected_for_other_version_states():
         binding_for_wire_version(0x307, variant="final")
     with pytest.raises(SchemaConflictError):
         binding_for_wire_version(None, variant="final")
+
+
+def input_schema_packets(key, hk_type=0):
+    binding = binding_for_key(key)
+    hello = binding.pystruct.startup_hello()
+    hello.SW_version = binding.canonical_schema_id
+    hk = getattr(binding.pystruct, f"housekeeping_data_{hk_type}")()
+    hk.base.version = binding.canonical_schema_id
+    hk.base.housekeeping_type = hk_type
+    return [(0x209, bytes(hello)), (0x206, bytes(hk))]
+
+
+@pytest.mark.parametrize("key", ["306-early", "306-final"])
+def test_full_input_schema_proof_round_trips_and_decodes_subsets(tmp_path, key):
+    from uncrater import Collection
+
+    resolution = resolve_packet_stream(input_schema_packets(key))
+    assert resolution.binding.binding_key == key
+    assert resolution.evidence
+    restored = schema_resolution_from_record(schema_resolution_record(resolution))
+    assert restored == resolution
+    subset = input_schema_packets(key, hk_type=1)
+    assert resolve_packet_stream(subset, inherited=restored).binding is resolution.binding
+    for index, (appid, blob) in enumerate(subset):
+        (tmp_path / f"{index:05d}_{appid:04x}.bin").write_bytes(blob)
+    collection = Collection(tmp_path, schema_resolution=restored)
+    assert collection.selected_schema_bindings == (key,)
+    assert len(collection.housekeeping_packets) == 1
+    assert collection.decode_status.ok
+    assert collection.canonical_report()["input_schema"] == schema_resolution_record(restored)
+
+
+@pytest.mark.parametrize("change", ["version", "evidence", "variant"])
+def test_inherited_schema_rejects_local_contradictions(change):
+    resolution = resolve_packet_stream(input_schema_packets("306-early"))
+    packets = input_schema_packets("306-final" if change == "evidence" else "307")
+    options = {}
+    if change == "variant":
+        packets = []
+        options["variant"] = "final"
+    with pytest.raises(SchemaConflictError):
+        resolve_packet_stream(packets, inherited=resolution, **options)
+
+
+def test_full_input_schema_rejects_mixed_versions():
+    with pytest.raises(SchemaConflictError):
+        resolve_packet_stream(input_schema_packets("306-early") + input_schema_packets("307"))
+
+
+@pytest.mark.parametrize("field, value", [("binding_key", "307"), ("abi_fingerprint", "0" * 64),
+                                           ("schema_assumed", True), ("reported_version", True),
+                                           ("evidence", [{"appid": False, "payload_length": 2572, "housekeeping_type": 0}])])
+def test_stored_schema_rejects_malformed_or_forged_claims(field, value):
+    from uncrater.schema_registry import SchemaResolutionError
+
+    record = schema_resolution_record(resolve_packet_stream(input_schema_packets("306-early")))
+    record[field] = value
+    with pytest.raises(SchemaResolutionError):
+        schema_resolution_from_record(record)
+
+
+@pytest.mark.parametrize("key", ["306-early", "306-final"])
+def test_versionless_subset_inherits_effective_reported_version(tmp_path, key):
+    import numpy as np
+    from uncrater import Collection
+
+    resolution = resolve_packet_stream(input_schema_packets(key))
+    metadata = resolution.binding.pystruct.waveform_metadata()
+    metadata.unique_packet_id = 9
+    (tmp_path / "00000_02f0.bin").write_bytes(np.zeros(16384, dtype="<u2").tobytes())
+    (tmp_path / "00001_02fa.bin").write_bytes(bytes(metadata))
+    collection = Collection(tmp_path, schema_resolution=resolution)
+    assert collection.reported_schema_ids == (0x306,)
+    assert len(collection.waveform_groups) == 1
+    assert all(packet.reported_version == 0x306 for packet in collection.cont)

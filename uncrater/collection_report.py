@@ -4,7 +4,7 @@ import numpy as np
 
 from .Packet_Calibrator import Packet_Cal_Metadata
 from .Packet_Spectrum import Packet_Grimm
-from .schema_registry import binding_for_key
+from .schema_registry import binding_for_key, schema_resolution_record
 
 
 def canonical_report(collection):
@@ -75,6 +75,8 @@ def canonical_report(collection):
     )
     return {
         "report_schema_version": 1,
+        **({"input_schema": schema_resolution_record(collection.schema_resolution)}
+           if collection.schema_resolution is not None else {}),
         "reported_schema_ids": [
             f"0x{version:03X}" for version in collection.reported_schema_ids
         ],

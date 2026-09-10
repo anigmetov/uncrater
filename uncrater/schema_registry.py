@@ -179,6 +179,7 @@ class SchemaResolution:
     reported_version: int | None
     schema_assumed: bool
     issue_code: str | None = None
+    evidence: tuple[SchemaEvidence, ...] = ()
 
     @property
     def canonical_schema_id(self) -> int:
@@ -403,11 +404,12 @@ def resolve_wire_version(
         return SchemaResolution(LATEST_BINDING, None, True)
 
     if reported_version == 0x306:
+        evidence = tuple(dict.fromkeys(_normalize_evidence(evidence)))
         binding = _binding_for_306(
             variant=variant,
             evidence=_normalize_evidence(evidence),
         )
-        return SchemaResolution(binding, reported_version, False)
+        return SchemaResolution(binding, reported_version, False, evidence=evidence)
 
     if variant is not None:
         raise SchemaConflictError("Only wire schema 0x306 accepts a variant")
@@ -427,6 +429,93 @@ def resolve_wire_version(
             issue_code="unknown_schema",
         )
     raise UnknownSchemaError(reported_version)
+
+
+def resolve_packet_stream(packets, *, variant=None, diagnostic_override=False,
+                          inherited=None):
+    """Resolve all version prefixes and structural evidence before typed decode.
+
+    Packets are (AppID, bytes) pairs. An inherited resolution supplies evidence
+    from the full input when this is a subset; local bytes must agree with it.
+    Missing or truncated version prefixes remain the packet decoder's concern.
+    """
+    from .appids import normalize_dcb_appid
+
+    versions = set()
+    evidence = []
+    for appid, blob in packets:
+        appid = normalize_dcb_appid(appid)
+        if appid == 0x209 and len(blob) >= 4:
+            versions.add(struct.unpack_from("<I", blob)[0])
+        elif appid in (0x206, 0x20F, 0x280) and len(blob) >= 2:
+            versions.add(struct.unpack_from("<H", blob)[0])
+        if appid in (0x206, 0x280):
+            evidence.append(evidence_from_packet(appid, blob))
+    if inherited is not None:
+        if not isinstance(inherited, SchemaResolution):
+            raise TypeError("inherited schema must be a SchemaResolution")
+        expected = inherited.reported_version
+        if any(version != expected for version in versions):
+            raise SchemaConflictError("Packet versions conflict with the input schema")
+        versions = set() if expected is None else {expected}
+        evidence = [*inherited.evidence, *evidence]
+    if len(versions) > 1:
+        raise SchemaConflictError("One input reports conflicting wire schema versions")
+    reported_version = next(iter(versions), None)
+    resolution = resolve_wire_version(
+        reported_version, variant=variant, evidence=evidence,
+        diagnostic_override=diagnostic_override,
+    )
+    if inherited is not None and (
+        resolution.binding is not inherited.binding
+        or resolution.schema_assumed != inherited.schema_assumed
+        or resolution.issue_code != inherited.issue_code
+    ):
+        raise SchemaConflictError("Input schema resolution conflicts with its evidence")
+    return resolution
+
+
+def schema_resolution_record(resolution):
+    """Serialize input-wide evidence without local paths or mutable bindings."""
+    return {
+        "binding_key": resolution.binding.binding_key,
+        "abi_fingerprint": resolution.binding.abi_fingerprint,
+        "reported_version": resolution.reported_version,
+        "schema_assumed": resolution.schema_assumed,
+        "evidence": [
+            {"appid": item.appid, "payload_length": item.payload_length,
+             "housekeeping_type": item.housekeeping_type}
+            for item in resolution.evidence
+        ],
+    }
+
+
+def schema_resolution_from_record(record, *, diagnostic_override=False):
+    """Re-resolve persisted evidence and reject inconsistent schema claims."""
+    keys = {"binding_key", "abi_fingerprint", "reported_version", "schema_assumed", "evidence"}
+    if not isinstance(record, dict) or set(record) != keys:
+        raise SchemaResolutionError("Invalid input schema record")
+    version = record["reported_version"]
+    if version is not None and (type(version) is not int or not 0 <= version <= 0xFFFFFFFF):
+        raise SchemaResolutionError("Invalid reported schema version")
+    if type(record["schema_assumed"]) is not bool or not isinstance(record["evidence"], list):
+        raise SchemaResolutionError("Invalid input schema evidence")
+    evidence = []
+    for item in record["evidence"]:
+        if not isinstance(item, dict) or set(item) != {"appid", "payload_length", "housekeeping_type"}:
+            raise SchemaResolutionError("Invalid packet schema evidence")
+        if (type(item["appid"]) is not int or not 0 <= item["appid"] <= 0x7FF
+                or type(item["payload_length"]) is not int or item["payload_length"] < 0
+                or (item["housekeeping_type"] is not None and (
+                    type(item["housekeeping_type"]) is not int or not 0 <= item["housekeeping_type"] <= 0xFFFF))):
+            raise SchemaResolutionError("Invalid packet schema evidence values")
+        evidence.append(SchemaEvidence(**item))
+    resolution = resolve_wire_version(version, evidence=evidence, diagnostic_override=diagnostic_override)
+    if (resolution.binding.binding_key != record["binding_key"]
+            or resolution.binding.abi_fingerprint != record["abi_fingerprint"]
+            or resolution.schema_assumed != record["schema_assumed"]):
+        raise SchemaConflictError("Stored input schema disagrees with resolved evidence")
+    return resolution
 
 
 def binding_for_wire_version(
@@ -483,5 +572,8 @@ __all__ = [
     "binding_for_wire_version",
     "evidence_from_packet",
     "resolve_wire_version",
+    "resolve_packet_stream",
+    "schema_resolution_record",
+    "schema_resolution_from_record",
     "schema_assumed_for",
 ]
